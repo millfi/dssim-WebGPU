@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "engine": "ref-dssim-cli",
+  "status": "ok",
+  "input": {
+    "image1": "D:\\dssim-WebGPU\\tests\\test1-sm.png",
+    "image2": "D:\\dssim-WebGPU\\tests\\test2-sm.png"
+  },
+  "command": "dssim \"D:\\dssim-WebGPU\\tests\\test1-sm.png\" \"D:\\dssim-WebGPU\\tests\\test2-sm.png\"",
+  "version": "Version 3.4.0 https://kornel.ski/dssim",
+  "result": {
+    "score_text": "0.00122233",
+    "score_f64": 0.00122233,
+    "score_bits_u64": "0x3F5406D2D7FEAF1D",
+    "compared_path": "D:\\dssim-WebGPU\\tests\\test2-sm.png"
+  },
+  "stdout": "0.00122233\tD:\\dssim-WebGPU\\tests\\test2-sm.png",
+  "timestamp_utc": "2026-02-20T09:38:01.4255752Z"
+}

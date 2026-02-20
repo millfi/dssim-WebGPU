@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "generator": "tools/make_golden.ps1",
+  "generated_at_utc": "2026-02-20T09:38:01.4708928Z",
+  "reference_engine": "ref-dssim-cli",
+  "pairs": [
+    {
+      "name": "gray-profile__gray-profile2",
+      "image1": "tests/gray-profile.png",
+      "image2": "tests/gray-profile2.png",
+      "output_json": "D:\\dssim-WebGPU\\tools\\golden\\gray-profile__gray-profile2.ref.json"
+    },
+    {
+      "name": "profile__profile-stripped",
+      "image1": "tests/profile.png",
+      "image2": "tests/profile-stripped.png",
+      "output_json": "D:\\dssim-WebGPU\\tools\\golden\\profile__profile-stripped.ref.json"
+    },
+    {
+      "name": "test1-sm__test2-sm",
+      "image1": "tests/test1-sm.png",
+      "image2": "tests/test2-sm.png",
+      "output_json": "D:\\dssim-WebGPU\\tools\\golden\\test1-sm__test2-sm.ref.json"
+    }
+  ]
+}

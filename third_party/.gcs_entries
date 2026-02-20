@@ -1,0 +1,36 @@
+{
+  "dawn": {
+    "dawn/build/linux/debian_bullseye_armhf-sysroot": [
+      "b45a7f586a107380ca6141b00d74321922b41d6d327dc33e74a2f82fd454304c"
+    ],
+    "dawn/build/linux/debian_bullseye_arm64-sysroot": [
+      "c7176a4c7aacbf46bda58a029f39f79a68008d3dee6518f154dcf5161a5486d8"
+    ],
+    "dawn/build/linux/debian_bullseye_i386-sysroot": [
+      "3de724b0d63478e1ae35f07b95d02261581a66e05c19aebe4e443d76179a565e"
+    ],
+    "dawn/build/linux/debian_bullseye_mipsel-sysroot": [
+      "82e930d6fa5d5ab1172cabc63b911ec800b182b4f8c14a273a89596541fe8658"
+    ],
+    "dawn/build/linux/debian_bullseye_mips64el-sysroot": [
+      "c847a32ae492aa14688be47fa696026e8dae8d9f4f589ec42fad29862bf311b3"
+    ],
+    "dawn/build/linux/debian_bullseye_amd64-sysroot": [
+      "52d61d4446ffebfaa3dda2cd02da4ab4876ff237853f46d273e7f9b666652e1d"
+    ]
+  },
+  "dawn/buildtools": {
+    "dawn/buildtools/win-format": [
+      "565cab9c66d61360c27c7d4df5defe1a78ab56d3"
+    ],
+    "dawn/buildtools/mac-format": [
+      "7d46d237f9664f41ef46b10c1392dcb559250f25"
+    ],
+    "dawn/buildtools/mac_arm64-format": [
+      "8503422f469ae56cc74f0ea2c03f2d872f4a2303"
+    ],
+    "dawn/buildtools/linux64-format": [
+      "79a7b4e5336339c17b828de10d80611ff0f85961"
+    ]
+  }
+}
