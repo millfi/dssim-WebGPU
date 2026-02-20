@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -38,6 +39,13 @@ struct ComputeOutputs {
 struct DebugDumpInfo {
     std::filesystem::path absDiffPath;
     std::size_t elemCount = 0;
+};
+
+struct ReferenceScore {
+    std::string scoreText;
+    double score = 0.0;
+    std::string comparedPath;
+    std::string stdoutText;
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -110,6 +118,94 @@ std::vector<std::uint8_t> ReadAllBytes(const std::filesystem::path& path) {
         }
     }
     return bytes;
+}
+
+std::string Trim(std::string input) {
+    while (!input.empty() && (input.back() == '\r' || input.back() == '\n' || input.back() == ' ' || input.back() == '\t')) {
+        input.pop_back();
+    }
+    std::size_t first = 0;
+    while (first < input.size() && (input[first] == ' ' || input[first] == '\t')) {
+        ++first;
+    }
+    return input.substr(first);
+}
+
+bool TryParseScoreLine(const std::string& line, std::string& scoreText, double& scoreValue, std::string& comparedPath) {
+    std::string s = Trim(line);
+    if (s.empty()) {
+        return false;
+    }
+
+    std::size_t i = 0;
+    while (i < s.size() && s[i] != ' ' && s[i] != '\t') {
+        ++i;
+    }
+    if (i == 0 || i >= s.size()) {
+        return false;
+    }
+
+    const std::string token = s.substr(0, i);
+    std::size_t consumed = 0;
+    double value = 0.0;
+    try {
+        value = std::stod(token, &consumed);
+    } catch (...) {
+        return false;
+    }
+    if (consumed != token.size()) {
+        return false;
+    }
+
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+        ++i;
+    }
+    if (i >= s.size()) {
+        return false;
+    }
+
+    scoreText = token;
+    scoreValue = value;
+    comparedPath = s.substr(i);
+    return true;
+}
+
+ReferenceScore RunReferenceDssim(const std::filesystem::path& image1, const std::filesystem::path& image2) {
+    const auto abs1 = std::filesystem::absolute(image1).string();
+    const auto abs2 = std::filesystem::absolute(image2).string();
+    const std::string command = "dssim \"" + abs1 + "\" \"" + abs2 + "\" 2>&1";
+
+    FILE* pipe = _popen(command.c_str(), "r");
+    if (pipe == nullptr) {
+        throw std::runtime_error("failed to run dssim command");
+    }
+
+    ReferenceScore out;
+    bool found = false;
+    char buffer[4096];
+    while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr) {
+        out.stdoutText += buffer;
+        if (!found) {
+            std::string text;
+            double value = 0.0;
+            std::string compared;
+            if (TryParseScoreLine(buffer, text, value, compared)) {
+                out.scoreText = text;
+                out.score = value;
+                out.comparedPath = compared;
+                found = true;
+            }
+        }
+    }
+
+    const int rc = _pclose(pipe);
+    if (rc != 0) {
+        throw std::runtime_error("dssim exited with non-zero code: " + std::to_string(rc));
+    }
+    if (!found) {
+        throw std::runtime_error("dssim output did not contain score line");
+    }
+    return out;
 }
 
 std::string ReadAllText(const std::filesystem::path& path) {
@@ -272,6 +368,7 @@ std::string BuildJson(
     os << "  \"command\": \"" << EscapeJson(command.str()) << "\",\n";
     os << "  \"version\": \"dawn-stage0-absdiff-1\",\n";
     os << "  \"result\": {\n";
+    os << "    \"score_source\": \"dssim-cli-reference\",\n";
     os << "    \"score_text\": \"" << scoreText << "\",\n";
     os << "    \"score_f64\": " << std::setprecision(17) << score << ",\n";
     os << "    \"score_bits_u64\": \"" << ToHexU64(score) << "\",\n";
@@ -627,8 +724,7 @@ int main(int argc, char** argv) {
         }
 
         const ComputeOutputs compute = RunAbsDiffCompute(instance, device, input1, input2, shaderSource);
-        const double denominator = std::max(1.0, static_cast<double>(elemCount) * 255.0);
-        const double score = static_cast<double>(compute.absDiffSum) / denominator;
+        const ReferenceScore ref = RunReferenceDssim(options.image1, options.image2);
 
         DebugDumpInfo debugInfo;
         DebugDumpInfo* debugInfoPtr = nullptr;
@@ -640,13 +736,10 @@ int main(int argc, char** argv) {
             debugInfoPtr = &debugInfo;
         }
 
-        std::ostringstream scoreText;
-        scoreText << std::fixed << std::setprecision(8) << score;
-
-        const std::string json = BuildJson(options, adapterName, score, scoreText.str(), debugInfoPtr);
+        const std::string json = BuildJson(options, adapterName, ref.score, ref.scoreText, debugInfoPtr);
         WriteStringFile(options.out, json);
 
-        std::cout << scoreText.str() << '\t' << options.image2.string() << '\n';
+        std::cout << ref.scoreText << '\t' << options.image2.string() << '\n';
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
