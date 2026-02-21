@@ -147,9 +147,9 @@ std::filesystem::path ResolveShaderPath(
 }
 
 CliOptions ParseArgs(int argc, char** argv) {
-    if (argc < 5) {
+    if (argc < 3) {
         throw std::runtime_error(
-            "usage: dssim_gpu_dawn_checksum <img1> <img2> --out <json> "
+            "usage: dssim_gpu_dawn_checksum <img1> <img2> [--out <json>] "
             "[--debug-dump-dir <dir>]");
     }
 
@@ -187,10 +187,6 @@ CliOptions ParseArgs(int argc, char** argv) {
         }
 
         throw std::runtime_error("unknown argument: " + arg);
-    }
-
-    if (options.out.empty()) {
-        throw std::runtime_error("missing --out <json>");
     }
 
     if (options.debugDumpEnabled && options.debugDumpDir.empty()) {
@@ -746,8 +742,10 @@ int main(int argc, char** argv) {
             debugInfoPtr = &debugInfo;
         }
 
-        const std::string json = BuildJson(options, adapterName, decoded1, decoded2, compute, debugInfoPtr);
-        WriteStringFile(options.out, json);
+        if (!options.out.empty()) {
+            const std::string json = BuildJson(options, adapterName, decoded1, decoded2, compute, debugInfoPtr);
+            WriteStringFile(options.out, json);
+        }
 
         std::ostringstream scoreText;
         scoreText << std::fixed << std::setprecision(8) << compute.score;
