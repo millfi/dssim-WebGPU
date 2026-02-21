@@ -3,7 +3,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +24,8 @@
 
 namespace {
 
+constexpr std::uint32_t kStage0QScale = 1000000u;
+
 struct CliOptions {
     std::filesystem::path image1;
     std::filesystem::path image2;
@@ -34,12 +35,13 @@ struct CliOptions {
 };
 
 struct ComputeOutputs {
-    std::vector<std::uint32_t> absDiff;
-    std::uint64_t absDiffSum = 0;
+    std::vector<std::uint32_t> stage0DssimQ;
+    std::uint64_t stage0DssimQSum = 0;
+    double score = 0.0;
 };
 
 struct DebugDumpInfo {
-    std::filesystem::path absDiffPath;
+    std::filesystem::path stage0DssimPath;
     std::filesystem::path image1RgbaPath;
     std::filesystem::path image2RgbaPath;
     std::size_t elemCount = 0;
@@ -50,13 +52,6 @@ struct DecodedInputInfo {
     std::uint32_t height = 0;
     std::uint32_t channels = 0;
     std::size_t byteCount = 0;
-};
-
-struct ReferenceScore {
-    std::string scoreText;
-    double score = 0.0;
-    std::string comparedPath;
-    std::string stdoutText;
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -105,94 +100,6 @@ std::string ToHexU64(double value) {
     std::ostringstream os;
     os << "0x" << std::uppercase << std::hex << std::setw(16) << std::setfill('0') << bits;
     return os.str();
-}
-
-std::string Trim(std::string input) {
-    while (!input.empty() && (input.back() == '\r' || input.back() == '\n' || input.back() == ' ' || input.back() == '\t')) {
-        input.pop_back();
-    }
-    std::size_t first = 0;
-    while (first < input.size() && (input[first] == ' ' || input[first] == '\t')) {
-        ++first;
-    }
-    return input.substr(first);
-}
-
-bool TryParseScoreLine(const std::string& line, std::string& scoreText, double& scoreValue, std::string& comparedPath) {
-    std::string s = Trim(line);
-    if (s.empty()) {
-        return false;
-    }
-
-    std::size_t i = 0;
-    while (i < s.size() && s[i] != ' ' && s[i] != '\t') {
-        ++i;
-    }
-    if (i == 0 || i >= s.size()) {
-        return false;
-    }
-
-    const std::string token = s.substr(0, i);
-    std::size_t consumed = 0;
-    double value = 0.0;
-    try {
-        value = std::stod(token, &consumed);
-    } catch (...) {
-        return false;
-    }
-    if (consumed != token.size()) {
-        return false;
-    }
-
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
-        ++i;
-    }
-    if (i >= s.size()) {
-        return false;
-    }
-
-    scoreText = token;
-    scoreValue = value;
-    comparedPath = s.substr(i);
-    return true;
-}
-
-ReferenceScore RunReferenceDssim(const std::filesystem::path& image1, const std::filesystem::path& image2) {
-    const auto abs1 = std::filesystem::absolute(image1).string();
-    const auto abs2 = std::filesystem::absolute(image2).string();
-    const std::string command = "dssim \"" + abs1 + "\" \"" + abs2 + "\" 2>&1";
-
-    FILE* pipe = _popen(command.c_str(), "r");
-    if (pipe == nullptr) {
-        throw std::runtime_error("failed to run dssim command");
-    }
-
-    ReferenceScore out;
-    bool found = false;
-    char buffer[4096];
-    while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr) {
-        out.stdoutText += buffer;
-        if (!found) {
-            std::string text;
-            double value = 0.0;
-            std::string compared;
-            if (TryParseScoreLine(buffer, text, value, compared)) {
-                out.scoreText = text;
-                out.score = value;
-                out.comparedPath = compared;
-                found = true;
-            }
-        }
-    }
-
-    const int rc = _pclose(pipe);
-    if (rc != 0) {
-        throw std::runtime_error("dssim exited with non-zero code: " + std::to_string(rc));
-    }
-    if (!found) {
-        throw std::runtime_error("dssim output did not contain score line");
-    }
-    return out;
 }
 
 std::string ReadAllText(const std::filesystem::path& path) {
@@ -291,11 +198,20 @@ CliOptions ParseArgs(int argc, char** argv) {
     return options;
 }
 
-std::vector<std::uint32_t> PadBytesToU32(const std::vector<std::uint8_t>& bytes, std::size_t len) {
-    std::vector<std::uint32_t> out(len, 0u);
-    const std::size_t copyLen = std::min(len, bytes.size());
-    for (std::size_t i = 0; i < copyLen; ++i) {
-        out[i] = static_cast<std::uint32_t>(bytes[i]);
+std::vector<std::uint32_t> PackRgba8ToU32(const std::vector<std::uint8_t>& bytes) {
+    if ((bytes.size() % 4) != 0) {
+        throw std::runtime_error("rgba8 byte count is not divisible by 4");
+    }
+
+    const std::size_t pixelCount = bytes.size() / 4;
+    std::vector<std::uint32_t> out(pixelCount, 0u);
+    for (std::size_t i = 0; i < pixelCount; ++i) {
+        const std::size_t base = i * 4;
+        out[i] =
+            static_cast<std::uint32_t>(bytes[base + 0]) |
+            (static_cast<std::uint32_t>(bytes[base + 1]) << 8) |
+            (static_cast<std::uint32_t>(bytes[base + 2]) << 16) |
+            (static_cast<std::uint32_t>(bytes[base + 3]) << 24);
     }
     return out;
 }
@@ -352,8 +268,6 @@ std::string BuildJson(
     const DecodedInputInfo& decoded1,
     const DecodedInputInfo& decoded2,
     const ComputeOutputs& compute,
-    double score,
-    const std::string& scoreText,
     const DebugDumpInfo* debugInfo) {
     const auto abs1 = std::filesystem::absolute(options.image1).string();
     const auto abs2 = std::filesystem::absolute(options.image2).string();
@@ -369,7 +283,7 @@ std::string BuildJson(
     std::ostringstream os;
     os << "{\n";
     os << "  \"schema_version\": 1,\n";
-    os << "  \"engine\": \"gpu-dawn-wgsl-png-rgba8-absdiff\",\n";
+    os << "  \"engine\": \"gpu-dawn-wgsl-dssim-stage1x1\",\n";
     os << "  \"status\": \"ok\",\n";
     os << "  \"input\": {\n";
     os << "    \"image1\": \"" << EscapeJson(abs1) << "\",\n";
@@ -390,23 +304,21 @@ std::string BuildJson(
     os << "    }\n";
     os << "  },\n";
     os << "  \"command\": \"" << EscapeJson(command.str()) << "\",\n";
-    os << "  \"version\": \"dawn-stage0-absdiff-2\",\n";
+    os << "  \"version\": \"dawn-dssim-stage1x1-1\",\n";
     os << "  \"result\": {\n";
-    os << "    \"score_source\": \"dssim-cli-reference\",\n";
-    os << "    \"score_text\": \"" << scoreText << "\",\n";
-    os << "    \"score_f64\": " << std::setprecision(17) << score << ",\n";
-    os << "    \"score_bits_u64\": \"" << ToHexU64(score) << "\",\n";
+    std::ostringstream scoreText;
+    scoreText << std::fixed << std::setprecision(8) << compute.score;
+    os << "    \"score_source\": \"gpu-stage1x1-ssim-provisional\",\n";
+    os << "    \"score_text\": \"" << scoreText.str() << "\",\n";
+    os << "    \"score_f64\": " << std::setprecision(17) << compute.score << ",\n";
+    os << "    \"score_bits_u64\": \"" << ToHexU64(compute.score) << "\",\n";
     os << "    \"compared_path\": \"" << EscapeJson(abs2) << "\",\n";
     os << "    \"gpu_stage0\": {\n";
-    os << "      \"absdiff_sum_u64\": " << compute.absDiffSum << ",\n";
-    os << "      \"elem_count\": " << compute.absDiff.size() << ",\n";
-    if (compute.absDiff.empty()) {
-        os << "      \"l1_mean_normalized_f64\": 0.0\n";
-    } else {
-        const double denom = static_cast<double>(compute.absDiff.size()) * 255.0;
-        const double stage0Score = static_cast<double>(compute.absDiffSum) / denom;
-        os << "      \"l1_mean_normalized_f64\": " << std::setprecision(17) << stage0Score << "\n";
-    }
+    os << "      \"metric\": \"dssim_1x1_luma\",\n";
+    os << "      \"qscale\": " << kStage0QScale << ",\n";
+    os << "      \"sum_u64\": " << compute.stage0DssimQSum << ",\n";
+    os << "      \"elem_count\": " << compute.stage0DssimQ.size() << ",\n";
+    os << "      \"mean_f64\": " << std::setprecision(17) << compute.score << "\n";
     os << "    }\n";
     os << "  },\n";
     os << "  \"adapter\": \"" << EscapeJson(adapterName) << "\"";
@@ -424,8 +336,13 @@ std::string BuildJson(
         os << "      \"elem_type\": \"u8\",\n";
         os << "      \"elem_count\": " << decoded2.byteCount << "\n";
         os << "    },\n";
+        os << "    \"stage0_dssim1x1_u32le\": {\n";
+        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage0DssimPath).string()) << "\",\n";
+        os << "      \"elem_type\": \"u32_le\",\n";
+        os << "      \"elem_count\": " << debugInfo->elemCount << "\n";
+        os << "    },\n";
         os << "    \"stage0_absdiff_u32le\": {\n";
-        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->absDiffPath).string()) << "\",\n";
+        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage0DssimPath).string()) << "\",\n";
         os << "      \"elem_type\": \"u32_le\",\n";
         os << "      \"elem_count\": " << debugInfo->elemCount << "\n";
         os << "    }\n";
@@ -482,7 +399,15 @@ ComputeOutputs RunAbsDiffCompute(
     }
 
     const std::size_t dataBytes = elemCount * sizeof(std::uint32_t);
-    const std::size_t paramsBytes = sizeof(std::uint32_t);
+    struct ParamsData {
+        std::uint32_t len;
+        std::uint32_t qscale;
+    };
+    const ParamsData paramsData = {
+        static_cast<std::uint32_t>(elemCount),
+        kStage0QScale,
+    };
+    const std::size_t paramsBytes = sizeof(ParamsData);
 
     wgpu::BufferDescriptor storageDesc = {};
     storageDesc.size = static_cast<std::uint64_t>(dataBytes);
@@ -517,8 +442,7 @@ ComputeOutputs RunAbsDiffCompute(
     wgpu::Queue queue = device.GetQueue();
     queue.WriteBuffer(input1Buffer, 0, input1.data(), dataBytes);
     queue.WriteBuffer(input2Buffer, 0, input2.data(), dataBytes);
-    const std::uint32_t dispatchLen = static_cast<std::uint32_t>(elemCount);
-    queue.WriteBuffer(paramsBuffer, 0, &dispatchLen, paramsBytes);
+    queue.WriteBuffer(paramsBuffer, 0, &paramsData, paramsBytes);
 
     wgpu::ShaderModule shader = CreateShaderModule(device, shaderSource);
     if (!shader) {
@@ -536,7 +460,7 @@ ComputeOutputs RunAbsDiffCompute(
     layoutEntries[3].binding = 3;
     layoutEntries[3].visibility = wgpu::ShaderStage::Compute;
     layoutEntries[3].buffer.type = wgpu::BufferBindingType::Uniform;
-    layoutEntries[3].buffer.minBindingSize = sizeof(std::uint32_t);
+    layoutEntries[3].buffer.minBindingSize = sizeof(ParamsData);
 
     wgpu::BindGroupLayoutDescriptor bglDesc = {};
     bglDesc.entryCount = 4;
@@ -646,15 +570,17 @@ ComputeOutputs RunAbsDiffCompute(
     }
 
     ComputeOutputs outputs;
-    outputs.absDiff.resize(elemCount);
-    std::memcpy(outputs.absDiff.data(), mapped, dataBytes);
+    outputs.stage0DssimQ.resize(elemCount);
+    std::memcpy(outputs.stage0DssimQ.data(), mapped, dataBytes);
     readbackBuffer.Unmap();
 
     std::uint64_t sum = 0;
-    for (std::uint32_t v : outputs.absDiff) {
+    for (std::uint32_t v : outputs.stage0DssimQ) {
         sum += static_cast<std::uint64_t>(v);
     }
-    outputs.absDiffSum = sum;
+    outputs.stage0DssimQSum = sum;
+    outputs.score = static_cast<double>(sum) /
+                    (static_cast<double>(elemCount) * static_cast<double>(paramsData.qscale));
     return outputs;
 }
 
@@ -741,6 +667,9 @@ int main(int argc, char** argv) {
         if (image1.pixels.empty() || image2.pixels.empty()) {
             throw std::runtime_error("decoded png pixels are empty");
         }
+        if (image1.width != image2.width || image1.height != image2.height) {
+            throw std::runtime_error("image size mismatch; stage1 requires identical dimensions");
+        }
 
         const DecodedInputInfo decoded1 = {
             image1.width,
@@ -755,9 +684,8 @@ int main(int argc, char** argv) {
             image2.pixels.size(),
         };
 
-        const std::size_t elemCount = std::max(image1.pixels.size(), image2.pixels.size());
-        const auto input1 = PadBytesToU32(image1.pixels, elemCount);
-        const auto input2 = PadBytesToU32(image2.pixels, elemCount);
+        const auto input1 = PackRgba8ToU32(image1.pixels);
+        const auto input2 = PackRgba8ToU32(image2.pixels);
 
         dawnProcSetProcs(&dawn::native::GetProcs());
 
@@ -782,7 +710,6 @@ int main(int argc, char** argv) {
         }
 
         const ComputeOutputs compute = RunAbsDiffCompute(instance, device, input1, input2, shaderSource);
-        const ReferenceScore ref = RunReferenceDssim(options.image1, options.image2);
 
         DebugDumpInfo debugInfo;
         DebugDumpInfo* debugInfoPtr = nullptr;
@@ -790,18 +717,20 @@ int main(int argc, char** argv) {
             std::filesystem::create_directories(options.debugDumpDir);
             debugInfo.image1RgbaPath = options.debugDumpDir / "image1_rgba8.gpu.bin";
             debugInfo.image2RgbaPath = options.debugDumpDir / "image2_rgba8.gpu.bin";
-            debugInfo.absDiffPath = options.debugDumpDir / "stage0_absdiff_u32le.gpu.bin";
-            debugInfo.elemCount = compute.absDiff.size();
+            debugInfo.stage0DssimPath = options.debugDumpDir / "stage0_dssim1x1_u32le.gpu.bin";
+            debugInfo.elemCount = compute.stage0DssimQ.size();
             WriteU8Buffer(debugInfo.image1RgbaPath, image1.pixels);
             WriteU8Buffer(debugInfo.image2RgbaPath, image2.pixels);
-            WriteU32LeBuffer(debugInfo.absDiffPath, compute.absDiff);
+            WriteU32LeBuffer(debugInfo.stage0DssimPath, compute.stage0DssimQ);
             debugInfoPtr = &debugInfo;
         }
 
-        const std::string json = BuildJson(options, adapterName, decoded1, decoded2, compute, ref.score, ref.scoreText, debugInfoPtr);
+        const std::string json = BuildJson(options, adapterName, decoded1, decoded2, compute, debugInfoPtr);
         WriteStringFile(options.out, json);
 
-        std::cout << ref.scoreText << '\t' << options.image2.string() << '\n';
+        std::ostringstream scoreText;
+        scoreText << std::fixed << std::setprecision(8) << compute.score;
+        std::cout << scoreText.str() << '\t' << options.image2.string() << '\n';
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
