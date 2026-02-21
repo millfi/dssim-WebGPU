@@ -13,6 +13,13 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> out_lab: Vec4Buf;
 @group(0) @binding(2) var<uniform> params: Params;
 
+fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
 fn cbrt_poly(x: f32) -> f32 {
     var y = (-0.5 * x + 1.51) * x + 0.2;
     var y3 = y * y * y;
@@ -94,8 +101,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y = i32(i / params.width);
     let max_x = i32(params.width) - 1;
     let max_y = i32(params.height) - 1;
-
-    let center = lab_from_rgbaplu(in_pixels.values[i], x, y);
+    let a = in_pixels.values[i].a;
+    let input = vec4<f32>(  srgb_to_linear(in_pixels.values[i].r) * a,
+                            srgb_to_linear(in_pixels.values[i].g) * a,
+                            srgb_to_linear(in_pixels.values[i].b) * a,
+                            a
+                            );
+    let center = lab_from_rgbaplu(input, x, y);
 
     var pre_a = 0.0;
     var pre_b = 0.0;
@@ -105,7 +117,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ny = clamp(y + dy, 0, max_y);
             let ni = u32(ny) * params.width + u32(nx);
             let w = gaussian_weight_5x5(dx, dy);
-            let lab = lab_from_rgbaplu(in_pixels.values[ni], nx, ny);
+            let a = in_pixels.values[ni].a;
+            let input_ni = vec4<f32>(    srgb_to_linear(in_pixels.values[ni].r) * a,
+                                srgb_to_linear(in_pixels.values[ni].g) * a,
+                                srgb_to_linear(in_pixels.values[ni].b) * a,
+                                a
+                            );
+            let lab = lab_from_rgbaplu(input_ni, nx, ny);
             pre_a = pre_a + w * lab.y;
             pre_b = pre_b + w * lab.z;
         }

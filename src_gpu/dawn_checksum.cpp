@@ -235,13 +235,6 @@ CliOptions ParseArgs(int argc, char** argv) {
     return options;
 }
 
-float SrgbToLinear(float c) {
-    if (c <= 0.04045f) {
-        return c / 12.92f;
-    }
-    return std::pow((c + 0.055f) / 1.055f, 2.4f);
-}
-
 float LinearToSrgb(float c) {
     if (c <= 0.0031308f) {
         return c * 12.92f;
@@ -263,11 +256,10 @@ std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>&
     std::vector<LinearRgba> out(pixelCount);
     for (std::size_t i = 0; i < pixelCount; ++i) {
         const std::size_t base = i * 4;
-        const float a = static_cast<float>(bytes[base + 3]) / 255.0f;
-        out[i].r = SrgbToLinear(static_cast<float>(bytes[base + 0]) / 255.0f) * a;
-        out[i].g = SrgbToLinear(static_cast<float>(bytes[base + 1]) / 255.0f) * a;
-        out[i].b = SrgbToLinear(static_cast<float>(bytes[base + 2]) / 255.0f) * a;
-        out[i].a = a;
+        out[i].r = static_cast<float>(bytes[base + 0]) / 255.0f;
+        out[i].g = static_cast<float>(bytes[base + 1]) / 255.0f;
+        out[i].b = static_cast<float>(bytes[base + 2]) / 255.0f;
+        out[i].a = static_cast<float>(bytes[base + 3]) / 255.0f;
     }
     return out;
 }

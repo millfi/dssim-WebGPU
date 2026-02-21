@@ -5,3 +5,5 @@ build/
 out/
 third_party/dawn/
 third_party/depot_tools/
+build_nothirdparty/
+build_without_dawn/

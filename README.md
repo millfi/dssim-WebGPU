@@ -16,12 +16,12 @@ As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
 
 ```powershell
 cmake -S . -B build -DDSSIM_ENABLE_DAWN_SAMPLE=ON `
-  -DDSSIM_DAWN_ROOT="$PWD/third_party/dawn" `
-  -DDSSIM_DAWN_OUT_DIR="$PWD/third_party/dawn/out/Release"
+  -DDSSIM_DAWN_ROOT="<path-to-dawn-src>" `
+  -DDSSIM_DAWN_OUT_DIR="<path-to-dawn-out-release>"
 
 cmake --build build --config Release --target dssim_gpu_dawn_checksum
 
-$env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"
+$env:PATH = "<path-to-dawn-out-release>;$env:PATH"
 
 .\build\src_gpu\Release\dssim_gpu_dawn_checksum.exe `
   .\tests\gray-profile.png .\tests\gray-profile2.png `
@@ -30,6 +30,8 @@ $env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"
 ```
 
 If `--out` is omitted, the score is printed to stdout.
+
+If Dawn is not available (for example after deleting third_party/dawn), configure/build still succeeds and only dssim_gpu_dummy is built.
 
 ### Notes
 

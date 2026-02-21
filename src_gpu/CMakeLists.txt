@@ -4,7 +4,7 @@ add_executable(dssim_gpu_dummy
     dummy_main.cpp
 )
 
-target_compile_features(dssim_gpu_dummy PRIVATE cxx_std_17)
+target_compile_features(dssim_gpu_dummy PRIVATE cxx_std_20)
 
 if(MSVC)
     target_compile_options(dssim_gpu_dummy PRIVATE /W4 /EHsc)
@@ -15,6 +15,7 @@ endif()
 option(DSSIM_ENABLE_DAWN_SAMPLE "Build Dawn native compute sample target" OFF)
 set(DSSIM_DAWN_ROOT "${CMAKE_SOURCE_DIR}/third_party/dawn" CACHE PATH "Path to Dawn source root")
 set(DSSIM_DAWN_OUT_DIR "${DSSIM_DAWN_ROOT}/out/Release" CACHE PATH "Path to Dawn GN build output directory")
+set(DSSIM_BUILD_DAWN_SAMPLE OFF)
 
 if(DSSIM_ENABLE_DAWN_SAMPLE)
     include(FetchContent)
@@ -87,18 +88,23 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
     )
 
     if(
-        NOT DSSIM_DAWN_INCLUDE_DIR OR
-        NOT DSSIM_DAWN_SRC_INCLUDE_DIR OR
-        NOT DSSIM_DAWN_WEBGPU_DAWN_LIB OR
-        NOT DSSIM_DAWN_DAWN_PROC_LIB OR
-        NOT DSSIM_DAWN_DAWN_NATIVE_LIB
+        DSSIM_DAWN_INCLUDE_DIR AND
+        DSSIM_DAWN_SRC_INCLUDE_DIR AND
+        DSSIM_DAWN_WEBGPU_DAWN_LIB AND
+        DSSIM_DAWN_DAWN_PROC_LIB AND
+        DSSIM_DAWN_DAWN_NATIVE_LIB
     )
-        message(FATAL_ERROR
-            "Dawn sample requested but required headers/libs not found. "
-            "Set DSSIM_DAWN_ROOT and DSSIM_DAWN_OUT_DIR correctly."
+        set(DSSIM_BUILD_DAWN_SAMPLE ON)
+    else()
+        message(WARNING
+            "Dawn sample requested but required headers/libs were not found. "
+            "Skipping dssim_gpu_dawn_checksum and continuing with dssim_gpu_dummy only. "
+            "Set DSSIM_DAWN_ROOT and DSSIM_DAWN_OUT_DIR to a valid Dawn build to enable it."
         )
     endif()
+endif()
 
+if(DSSIM_BUILD_DAWN_SAMPLE)
     add_executable(dssim_gpu_dawn_checksum
         dawn_checksum.cpp
         png_loader.cpp
@@ -107,7 +113,7 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
     set(DSSIM_GPU_DOWNSAMPLE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/downsample_2x2.wgsl")
     set(DSSIM_GPU_LAB_PREPROCESS_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/lab_preprocess.wgsl")
 
-    target_compile_features(dssim_gpu_dawn_checksum PRIVATE cxx_std_17)
+    target_compile_features(dssim_gpu_dawn_checksum PRIVATE cxx_std_20)
     target_include_directories(dssim_gpu_dawn_checksum PRIVATE
         "${DSSIM_DAWN_INCLUDE_DIR}"
         "${DSSIM_DAWN_SRC_INCLUDE_DIR}"
