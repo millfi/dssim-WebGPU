@@ -14,10 +14,17 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> outv: U32Buf;
 @group(0) @binding(3) var<uniform> params: Params;
 
+fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
 fn luma_from_rgba8_packed(p: u32) -> f32 {
-    let r = f32((p >> 0u) & 0xFFu) / 255.0;
-    let g = f32((p >> 8u) & 0xFFu) / 255.0;
-    let b = f32((p >> 16u) & 0xFFu) / 255.0;
+    let r = srgb_to_linear(f32((p >> 0u) & 0xFFu) / 255.0);
+    let g = srgb_to_linear(f32((p >> 8u) & 0xFFu) / 255.0);
+    let b = srgb_to_linear(f32((p >> 16u) & 0xFFu) / 255.0);
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
