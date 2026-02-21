@@ -610,6 +610,9 @@ wgpu::Adapter RequestAdapterBlocking(const wgpu::Instance& instance) {
     RequestState state;
 
     wgpu::RequestAdapterOptions options = {};
+#if defined(_WIN32)
+    options.backendType = wgpu::BackendType::D3D12;
+#endif
     instance.RequestAdapter(
         &options,
         wgpu::CallbackMode::AllowProcessEvents,
@@ -686,6 +689,7 @@ int main(int argc, char** argv) {
         if (image1.width != image2.width || image1.height != image2.height) {
             throw std::runtime_error("image size mismatch; stage3x3 requires identical dimensions");
         }
+        const auto decodeDoneAt = std::chrono::steady_clock::now();
 
         const DecodedInputInfo decoded1 = {
             image1.width,
@@ -756,6 +760,9 @@ int main(int argc, char** argv) {
         std::ostringstream scoreText;
         scoreText << std::fixed << std::setprecision(8) << compute.score;
         std::cout << scoreText.str() << '\t' << options.image2.string() << '\n';
+        const auto scoreReadyAt = std::chrono::steady_clock::now();
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(scoreReadyAt - decodeDoneAt).count();
+        std::cout << "[timing] decode_done_to_score_ms=" << elapsedMs << '\n';
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
