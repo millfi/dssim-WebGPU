@@ -104,6 +104,7 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
         png_loader.cpp
     )
     set(DSSIM_GPU_STAGE0_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/stage0_absdiff.wgsl")
+    set(DSSIM_GPU_DOWNSAMPLE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/downsample_2x2.wgsl")
 
     target_compile_features(dssim_gpu_dawn_checksum PRIVATE cxx_std_17)
     target_include_directories(dssim_gpu_dawn_checksum PRIVATE
@@ -133,5 +134,8 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_STAGE0_SHADER}"
             "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/shaders/stage0_absdiff.wgsl"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DSSIM_GPU_DOWNSAMPLE_SHADER}"
+            "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/shaders/downsample_2x2.wgsl"
     )
 endif()
