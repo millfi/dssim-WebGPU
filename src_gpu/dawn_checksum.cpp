@@ -25,6 +25,8 @@
 namespace {
 
 constexpr std::uint32_t kStage0QScale = 1000000u;
+constexpr std::uint32_t kStage0WindowRadius = 1u;
+constexpr std::uint32_t kStage0WindowSize = kStage0WindowRadius * 2u + 1u;
 
 struct CliOptions {
     std::filesystem::path image1;
@@ -283,7 +285,7 @@ std::string BuildJson(
     std::ostringstream os;
     os << "{\n";
     os << "  \"schema_version\": 1,\n";
-    os << "  \"engine\": \"gpu-dawn-wgsl-dssim-stage1x1\",\n";
+    os << "  \"engine\": \"gpu-dawn-wgsl-dssim-stage3x3\",\n";
     os << "  \"status\": \"ok\",\n";
     os << "  \"input\": {\n";
     os << "    \"image1\": \"" << EscapeJson(abs1) << "\",\n";
@@ -304,17 +306,19 @@ std::string BuildJson(
     os << "    }\n";
     os << "  },\n";
     os << "  \"command\": \"" << EscapeJson(command.str()) << "\",\n";
-    os << "  \"version\": \"dawn-dssim-stage1x1-1\",\n";
+    os << "  \"version\": \"dawn-dssim-stage3x3-1\",\n";
     os << "  \"result\": {\n";
     std::ostringstream scoreText;
     scoreText << std::fixed << std::setprecision(8) << compute.score;
-    os << "    \"score_source\": \"gpu-stage1x1-ssim-provisional\",\n";
+    os << "    \"score_source\": \"gpu-stage3x3-ssim-provisional\",\n";
     os << "    \"score_text\": \"" << scoreText.str() << "\",\n";
     os << "    \"score_f64\": " << std::setprecision(17) << compute.score << ",\n";
     os << "    \"score_bits_u64\": \"" << ToHexU64(compute.score) << "\",\n";
     os << "    \"compared_path\": \"" << EscapeJson(abs2) << "\",\n";
     os << "    \"gpu_stage0\": {\n";
-    os << "      \"metric\": \"dssim_1x1_luma\",\n";
+    os << "      \"metric\": \"dssim_3x3_luma\",\n";
+    os << "      \"window_radius\": " << kStage0WindowRadius << ",\n";
+    os << "      \"window_size\": " << kStage0WindowSize << ",\n";
     os << "      \"qscale\": " << kStage0QScale << ",\n";
     os << "      \"sum_u64\": " << compute.stage0DssimQSum << ",\n";
     os << "      \"elem_count\": " << compute.stage0DssimQ.size() << ",\n";
@@ -336,7 +340,7 @@ std::string BuildJson(
         os << "      \"elem_type\": \"u8\",\n";
         os << "      \"elem_count\": " << decoded2.byteCount << "\n";
         os << "    },\n";
-        os << "    \"stage0_dssim1x1_u32le\": {\n";
+        os << "    \"stage0_dssim3x3_u32le\": {\n";
         os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage0DssimPath).string()) << "\",\n";
         os << "      \"elem_type\": \"u32_le\",\n";
         os << "      \"elem_count\": " << debugInfo->elemCount << "\n";
@@ -380,11 +384,13 @@ wgpu::ShaderModule CreateShaderModule(const wgpu::Device& device, const std::str
     return device.CreateShaderModule(&shaderDesc);
 }
 
-ComputeOutputs RunAbsDiffCompute(
+ComputeOutputs RunStage0Compute(
     const wgpu::Instance& instance,
     const wgpu::Device& device,
     const std::vector<std::uint32_t>& input1,
     const std::vector<std::uint32_t>& input2,
+    std::uint32_t width,
+    std::uint32_t height,
     const std::string& shaderSource) {
     if (input1.size() != input2.size()) {
         throw std::runtime_error("input buffer size mismatch");
@@ -397,14 +403,22 @@ ComputeOutputs RunAbsDiffCompute(
     if (elemCount > std::numeric_limits<std::uint32_t>::max()) {
         throw std::runtime_error("input too large for u32 dispatch length");
     }
+    const std::size_t expectedCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (expectedCount != elemCount) {
+        throw std::runtime_error("pixel count mismatch between input buffers and dimensions");
+    }
 
     const std::size_t dataBytes = elemCount * sizeof(std::uint32_t);
     struct ParamsData {
         std::uint32_t len;
+        std::uint32_t width;
+        std::uint32_t height;
         std::uint32_t qscale;
     };
     const ParamsData paramsData = {
         static_cast<std::uint32_t>(elemCount),
+        width,
+        height,
         kStage0QScale,
     };
     const std::size_t paramsBytes = sizeof(ParamsData);
@@ -668,7 +682,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("decoded png pixels are empty");
         }
         if (image1.width != image2.width || image1.height != image2.height) {
-            throw std::runtime_error("image size mismatch; stage1 requires identical dimensions");
+            throw std::runtime_error("image size mismatch; stage3x3 requires identical dimensions");
         }
 
         const DecodedInputInfo decoded1 = {
@@ -709,7 +723,14 @@ int main(int argc, char** argv) {
             }
         }
 
-        const ComputeOutputs compute = RunAbsDiffCompute(instance, device, input1, input2, shaderSource);
+        const ComputeOutputs compute = RunStage0Compute(
+            instance,
+            device,
+            input1,
+            input2,
+            image1.width,
+            image1.height,
+            shaderSource);
 
         DebugDumpInfo debugInfo;
         DebugDumpInfo* debugInfoPtr = nullptr;
@@ -717,7 +738,7 @@ int main(int argc, char** argv) {
             std::filesystem::create_directories(options.debugDumpDir);
             debugInfo.image1RgbaPath = options.debugDumpDir / "image1_rgba8.gpu.bin";
             debugInfo.image2RgbaPath = options.debugDumpDir / "image2_rgba8.gpu.bin";
-            debugInfo.stage0DssimPath = options.debugDumpDir / "stage0_dssim1x1_u32le.gpu.bin";
+            debugInfo.stage0DssimPath = options.debugDumpDir / "stage0_dssim3x3_u32le.gpu.bin";
             debugInfo.elemCount = compute.stage0DssimQ.size();
             WriteU8Buffer(debugInfo.image1RgbaPath, image1.pixels);
             WriteU8Buffer(debugInfo.image2RgbaPath, image2.pixels);
