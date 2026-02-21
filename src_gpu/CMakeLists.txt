@@ -17,6 +17,41 @@ set(DSSIM_DAWN_ROOT "${CMAKE_SOURCE_DIR}/third_party/dawn" CACHE PATH "Path to D
 set(DSSIM_DAWN_OUT_DIR "${DSSIM_DAWN_ROOT}/out/Release" CACHE PATH "Path to Dawn GN build output directory")
 
 if(DSSIM_ENABLE_DAWN_SAMPLE)
+    include(FetchContent)
+
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(dssim_zlib
+        URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
+    )
+    FetchContent_MakeAvailable(dssim_zlib)
+    if(TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
+        add_library(ZLIB::ZLIB ALIAS zlibstatic)
+    endif()
+
+    set(PNG_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+    set(PNG_SHARED OFF CACHE BOOL "" FORCE)
+    set(PNG_STATIC ON CACHE BOOL "" FORCE)
+    set(PNG_TESTS OFF CACHE BOOL "" FORCE)
+    set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
+    set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
+    set(PNG_HARDWARE_OPTIMIZATIONS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(dssim_libpng
+        URL https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.44.zip
+    )
+    FetchContent_MakeAvailable(dssim_libpng)
+
+    if(TARGET PNG::PNG)
+        set(DSSIM_PNG_TARGET PNG::PNG)
+    elseif(TARGET png_static)
+        set(DSSIM_PNG_TARGET png_static)
+    elseif(TARGET png)
+        set(DSSIM_PNG_TARGET png)
+    else()
+        message(FATAL_ERROR "libpng target not found after FetchContent")
+    endif()
+
     find_path(DSSIM_DAWN_INCLUDE_DIR
         NAMES dawn/webgpu_cpp.h
         PATHS
@@ -66,6 +101,7 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
 
     add_executable(dssim_gpu_dawn_checksum
         dawn_checksum.cpp
+        png_loader.cpp
     )
     set(DSSIM_GPU_STAGE0_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/shaders/stage0_absdiff.wgsl")
 
@@ -79,6 +115,7 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
         "${DSSIM_DAWN_WEBGPU_DAWN_LIB}"
         "${DSSIM_DAWN_DAWN_PROC_LIB}"
         "${DSSIM_DAWN_DAWN_NATIVE_LIB}"
+        "${DSSIM_PNG_TARGET}"
     )
 
     if(MSVC)

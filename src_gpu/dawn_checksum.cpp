@@ -21,6 +21,8 @@
 #include <dawn/native/DawnNative.h>
 #include <dawn/webgpu_cpp.h>
 
+#include "png_loader.h"
+
 namespace {
 
 struct CliOptions {
@@ -38,7 +40,16 @@ struct ComputeOutputs {
 
 struct DebugDumpInfo {
     std::filesystem::path absDiffPath;
+    std::filesystem::path image1RgbaPath;
+    std::filesystem::path image2RgbaPath;
     std::size_t elemCount = 0;
+};
+
+struct DecodedInputInfo {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t channels = 0;
+    std::size_t byteCount = 0;
 };
 
 struct ReferenceScore {
@@ -94,30 +105,6 @@ std::string ToHexU64(double value) {
     std::ostringstream os;
     os << "0x" << std::uppercase << std::hex << std::setw(16) << std::setfill('0') << bits;
     return os.str();
-}
-
-std::vector<std::uint8_t> ReadAllBytes(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        throw std::runtime_error("failed to open input: " + path.string());
-    }
-
-    input.seekg(0, std::ios::end);
-    const auto size = input.tellg();
-    input.seekg(0, std::ios::beg);
-
-    if (size < 0) {
-        throw std::runtime_error("failed to get file size: " + path.string());
-    }
-
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!input) {
-            throw std::runtime_error("failed to read bytes: " + path.string());
-        }
-    }
-    return bytes;
 }
 
 std::string Trim(std::string input) {
@@ -339,9 +326,31 @@ void WriteU32LeBuffer(const std::filesystem::path& outPath, const std::vector<st
     }
 }
 
+void WriteU8Buffer(const std::filesystem::path& outPath, const std::vector<std::uint8_t>& values) {
+    const auto parent = outPath.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent);
+    }
+
+    std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to open output: " + outPath.string());
+    }
+
+    if (!values.empty()) {
+        out.write(reinterpret_cast<const char*>(values.data()), static_cast<std::streamsize>(values.size()));
+    }
+
+    if (!out) {
+        throw std::runtime_error("failed to write output: " + outPath.string());
+    }
+}
+
 std::string BuildJson(
     const CliOptions& options,
     const std::string& adapterName,
+    const DecodedInputInfo& decoded1,
+    const DecodedInputInfo& decoded2,
     double score,
     const std::string& scoreText,
     const DebugDumpInfo* debugInfo) {
@@ -359,14 +368,28 @@ std::string BuildJson(
     std::ostringstream os;
     os << "{\n";
     os << "  \"schema_version\": 1,\n";
-    os << "  \"engine\": \"gpu-dawn-wgsl-byte-absdiff\",\n";
+    os << "  \"engine\": \"gpu-dawn-wgsl-png-rgba8-absdiff\",\n";
     os << "  \"status\": \"ok\",\n";
     os << "  \"input\": {\n";
     os << "    \"image1\": \"" << EscapeJson(abs1) << "\",\n";
     os << "    \"image2\": \"" << EscapeJson(abs2) << "\"\n";
     os << "  },\n";
+    os << "  \"decoded_input\": {\n";
+    os << "    \"image1\": {\n";
+    os << "      \"width\": " << decoded1.width << ",\n";
+    os << "      \"height\": " << decoded1.height << ",\n";
+    os << "      \"channels\": " << decoded1.channels << ",\n";
+    os << "      \"bytes\": " << decoded1.byteCount << "\n";
+    os << "    },\n";
+    os << "    \"image2\": {\n";
+    os << "      \"width\": " << decoded2.width << ",\n";
+    os << "      \"height\": " << decoded2.height << ",\n";
+    os << "      \"channels\": " << decoded2.channels << ",\n";
+    os << "      \"bytes\": " << decoded2.byteCount << "\n";
+    os << "    }\n";
+    os << "  },\n";
     os << "  \"command\": \"" << EscapeJson(command.str()) << "\",\n";
-    os << "  \"version\": \"dawn-stage0-absdiff-1\",\n";
+    os << "  \"version\": \"dawn-stage0-absdiff-2\",\n";
     os << "  \"result\": {\n";
     os << "    \"score_source\": \"dssim-cli-reference\",\n";
     os << "    \"score_text\": \"" << scoreText << "\",\n";
@@ -379,6 +402,16 @@ std::string BuildJson(
     if (debugInfo != nullptr) {
         os << ",\n";
         os << "  \"debug_dumps\": {\n";
+        os << "    \"image1_rgba8\": {\n";
+        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->image1RgbaPath).string()) << "\",\n";
+        os << "      \"elem_type\": \"u8\",\n";
+        os << "      \"elem_count\": " << decoded1.byteCount << "\n";
+        os << "    },\n";
+        os << "    \"image2_rgba8\": {\n";
+        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->image2RgbaPath).string()) << "\",\n";
+        os << "      \"elem_type\": \"u8\",\n";
+        os << "      \"elem_count\": " << decoded2.byteCount << "\n";
+        os << "    },\n";
         os << "    \"stage0_absdiff_u32le\": {\n";
         os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->absDiffPath).string()) << "\",\n";
         os << "      \"elem_type\": \"u32_le\",\n";
@@ -691,15 +724,28 @@ int main(int argc, char** argv) {
         const CliOptions options = ParseArgs(argc, argv);
         const auto shaderPath = ResolveShaderPath(argv[0], "stage0_absdiff.wgsl");
         const auto shaderSource = ReadAllText(shaderPath);
-        const auto bytes1 = ReadAllBytes(options.image1);
-        const auto bytes2 = ReadAllBytes(options.image2);
-        if (bytes1.empty() || bytes2.empty()) {
-            throw std::runtime_error("input image bytes are empty");
+        const DecodedImage image1 = LoadPngRgba8(options.image1);
+        const DecodedImage image2 = LoadPngRgba8(options.image2);
+        if (image1.pixels.empty() || image2.pixels.empty()) {
+            throw std::runtime_error("decoded png pixels are empty");
         }
 
-        const std::size_t elemCount = std::max(bytes1.size(), bytes2.size());
-        const auto input1 = PadBytesToU32(bytes1, elemCount);
-        const auto input2 = PadBytesToU32(bytes2, elemCount);
+        const DecodedInputInfo decoded1 = {
+            image1.width,
+            image1.height,
+            image1.channels,
+            image1.pixels.size(),
+        };
+        const DecodedInputInfo decoded2 = {
+            image2.width,
+            image2.height,
+            image2.channels,
+            image2.pixels.size(),
+        };
+
+        const std::size_t elemCount = std::max(image1.pixels.size(), image2.pixels.size());
+        const auto input1 = PadBytesToU32(image1.pixels, elemCount);
+        const auto input2 = PadBytesToU32(image2.pixels, elemCount);
 
         dawnProcSetProcs(&dawn::native::GetProcs());
 
@@ -730,13 +776,17 @@ int main(int argc, char** argv) {
         DebugDumpInfo* debugInfoPtr = nullptr;
         if (options.debugDumpEnabled) {
             std::filesystem::create_directories(options.debugDumpDir);
+            debugInfo.image1RgbaPath = options.debugDumpDir / "image1_rgba8.gpu.bin";
+            debugInfo.image2RgbaPath = options.debugDumpDir / "image2_rgba8.gpu.bin";
             debugInfo.absDiffPath = options.debugDumpDir / "stage0_absdiff_u32le.gpu.bin";
             debugInfo.elemCount = compute.absDiff.size();
+            WriteU8Buffer(debugInfo.image1RgbaPath, image1.pixels);
+            WriteU8Buffer(debugInfo.image2RgbaPath, image2.pixels);
             WriteU32LeBuffer(debugInfo.absDiffPath, compute.absDiff);
             debugInfoPtr = &debugInfo;
         }
 
-        const std::string json = BuildJson(options, adapterName, ref.score, ref.scoreText, debugInfoPtr);
+        const std::string json = BuildJson(options, adapterName, decoded1, decoded2, ref.score, ref.scoreText, debugInfoPtr);
         WriteStringFile(options.out, json);
 
         std::cout << ref.scoreText << '\t' << options.image2.string() << '\n';
