@@ -351,6 +351,7 @@ std::string BuildJson(
     const std::string& adapterName,
     const DecodedInputInfo& decoded1,
     const DecodedInputInfo& decoded2,
+    const ComputeOutputs& compute,
     double score,
     const std::string& scoreText,
     const DebugDumpInfo* debugInfo) {
@@ -395,7 +396,18 @@ std::string BuildJson(
     os << "    \"score_text\": \"" << scoreText << "\",\n";
     os << "    \"score_f64\": " << std::setprecision(17) << score << ",\n";
     os << "    \"score_bits_u64\": \"" << ToHexU64(score) << "\",\n";
-    os << "    \"compared_path\": \"" << EscapeJson(abs2) << "\"\n";
+    os << "    \"compared_path\": \"" << EscapeJson(abs2) << "\",\n";
+    os << "    \"gpu_stage0\": {\n";
+    os << "      \"absdiff_sum_u64\": " << compute.absDiffSum << ",\n";
+    os << "      \"elem_count\": " << compute.absDiff.size() << ",\n";
+    if (compute.absDiff.empty()) {
+        os << "      \"l1_mean_normalized_f64\": 0.0\n";
+    } else {
+        const double denom = static_cast<double>(compute.absDiff.size()) * 255.0;
+        const double stage0Score = static_cast<double>(compute.absDiffSum) / denom;
+        os << "      \"l1_mean_normalized_f64\": " << std::setprecision(17) << stage0Score << "\n";
+    }
+    os << "    }\n";
     os << "  },\n";
     os << "  \"adapter\": \"" << EscapeJson(adapterName) << "\"";
 
@@ -786,7 +798,7 @@ int main(int argc, char** argv) {
             debugInfoPtr = &debugInfo;
         }
 
-        const std::string json = BuildJson(options, adapterName, decoded1, decoded2, ref.score, ref.scoreText, debugInfoPtr);
+        const std::string json = BuildJson(options, adapterName, decoded1, decoded2, compute, ref.score, ref.scoreText, debugInfoPtr);
         WriteStringFile(options.out, json);
 
         std::cout << ref.scoreText << '\t' << options.image2.string() << '\n';
