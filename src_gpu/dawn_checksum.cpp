@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -25,9 +26,17 @@
 
 namespace {
 
-constexpr std::uint32_t kStage0QScale = 1000000u;
-constexpr std::uint32_t kStage0WindowRadius = 1u;
+constexpr std::uint32_t kStage0QScale = 100000000u;
+constexpr std::uint32_t kStage0WindowRadius = 2u;
 constexpr std::uint32_t kStage0WindowSize = kStage0WindowRadius * 2u + 1u;
+constexpr std::array<double, 5> kDefaultScaleWeights = {0.028, 0.197, 0.322, 0.298, 0.155};
+
+struct LinearRgba {
+    float r = 0.0f;
+    float g = 0.0f;
+    float b = 0.0f;
+    float a = 0.0f;
+};
 
 struct CliOptions {
     std::filesystem::path image1;
@@ -47,12 +56,13 @@ struct ScaleOutputs {
     std::vector<float> var2;
     std::vector<float> cov12;
     std::uint64_t dssimQSum = 0;
-    double score = 0.0;
+    double meanDssim = 0.0;
+    double ssimScore = 0.0;
 };
 
 struct MultiScaleOutputs {
-    ScaleOutputs scale0;
-    ScaleOutputs scale1;
+    std::vector<ScaleOutputs> scales;
+    double weightedSsim = 0.0;
     double score = 0.0;
 };
 
@@ -82,7 +92,7 @@ struct DecodedInputInfo {
 struct DownsampleOutputs {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    std::vector<std::uint32_t> pixels;
+    std::vector<LinearRgba> pixels;
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -225,32 +235,55 @@ CliOptions ParseArgs(int argc, char** argv) {
     return options;
 }
 
-std::vector<std::uint32_t> PackRgba8ToU32(const std::vector<std::uint8_t>& bytes) {
+float SrgbToLinear(float c) {
+    if (c <= 0.04045f) {
+        return c / 12.92f;
+    }
+    return std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+float LinearToSrgb(float c) {
+    if (c <= 0.0031308f) {
+        return c * 12.92f;
+    }
+    return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+std::uint8_t ToUnorm8(float value) {
+    const float clamped = std::clamp(value, 0.0f, 1.0f);
+    return static_cast<std::uint8_t>(std::lround(clamped * 255.0f));
+}
+
+std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>& bytes) {
     if ((bytes.size() % 4) != 0) {
         throw std::runtime_error("rgba8 byte count is not divisible by 4");
     }
 
     const std::size_t pixelCount = bytes.size() / 4;
-    std::vector<std::uint32_t> out(pixelCount, 0u);
+    std::vector<LinearRgba> out(pixelCount);
     for (std::size_t i = 0; i < pixelCount; ++i) {
         const std::size_t base = i * 4;
-        out[i] =
-            static_cast<std::uint32_t>(bytes[base + 0]) |
-            (static_cast<std::uint32_t>(bytes[base + 1]) << 8) |
-            (static_cast<std::uint32_t>(bytes[base + 2]) << 16) |
-            (static_cast<std::uint32_t>(bytes[base + 3]) << 24);
+        const float a = static_cast<float>(bytes[base + 3]) / 255.0f;
+        out[i].r = SrgbToLinear(static_cast<float>(bytes[base + 0]) / 255.0f) * a;
+        out[i].g = SrgbToLinear(static_cast<float>(bytes[base + 1]) / 255.0f) * a;
+        out[i].b = SrgbToLinear(static_cast<float>(bytes[base + 2]) / 255.0f) * a;
+        out[i].a = a;
     }
     return out;
 }
 
-std::vector<std::uint8_t> UnpackU32ToRgba8(const std::vector<std::uint32_t>& pixels) {
+std::vector<std::uint8_t> ConvertLinearPluToRgba8(const std::vector<LinearRgba>& pixels) {
     std::vector<std::uint8_t> out(pixels.size() * 4);
     for (std::size_t i = 0; i < pixels.size(); ++i) {
-        const std::uint32_t p = pixels[i];
-        out[i * 4 + 0] = static_cast<std::uint8_t>(p & 0xFFu);
-        out[i * 4 + 1] = static_cast<std::uint8_t>((p >> 8) & 0xFFu);
-        out[i * 4 + 2] = static_cast<std::uint8_t>((p >> 16) & 0xFFu);
-        out[i * 4 + 3] = static_cast<std::uint8_t>((p >> 24) & 0xFFu);
+        const float a = std::clamp(pixels[i].a, 0.0f, 1.0f);
+        const float invA = (a > 1.0e-8f) ? (1.0f / a) : 0.0f;
+        const float r = std::clamp(pixels[i].r * invA, 0.0f, 1.0f);
+        const float g = std::clamp(pixels[i].g * invA, 0.0f, 1.0f);
+        const float b = std::clamp(pixels[i].b * invA, 0.0f, 1.0f);
+        out[i * 4 + 0] = ToUnorm8(LinearToSrgb(r));
+        out[i * 4 + 1] = ToUnorm8(LinearToSrgb(g));
+        out[i * 4 + 2] = ToUnorm8(LinearToSrgb(b));
+        out[i * 4 + 3] = ToUnorm8(a);
     }
     return out;
 }
@@ -349,7 +382,7 @@ std::string BuildJson(
     std::ostringstream os;
     os << "{\n";
     os << "  \"schema_version\": 1,\n";
-    os << "  \"engine\": \"gpu-dawn-wgsl-dssim-ms2-stage3x3-gaussian-linear\",\n";
+    os << "  \"engine\": \"gpu-dawn-wgsl-dssim-ms-stage5x5-gaussian-linear\",\n";
     os << "  \"status\": \"ok\",\n";
     os << "  \"input\": {\n";
     os << "    \"image1\": \"" << EscapeJson(abs1) << "\",\n";
@@ -370,46 +403,43 @@ std::string BuildJson(
     os << "    }\n";
     os << "  },\n";
     os << "  \"command\": \"" << EscapeJson(command.str()) << "\",\n";
-    os << "  \"version\": \"dawn-dssim-ms2-stage3x3-gaussian-linear-1\",\n";
+    os << "  \"version\": \"dawn-dssim-ms-stage5x5-gaussian-linear-1\",\n";
     os << "  \"result\": {\n";
     std::ostringstream scoreText;
     scoreText << std::fixed << std::setprecision(8) << compute.score;
-    os << "    \"score_source\": \"gpu-ms2-stage3x3-gaussian-linear-provisional\",\n";
+    os << "    \"score_source\": \"gpu-reference-like-ms-ssim-provisional\",\n";
     os << "    \"score_text\": \"" << scoreText.str() << "\",\n";
     os << "    \"score_f64\": " << std::setprecision(17) << compute.score << ",\n";
     os << "    \"score_bits_u64\": \"" << ToHexU64(compute.score) << "\",\n";
     os << "    \"compared_path\": \"" << EscapeJson(abs2) << "\",\n";
     os << "    \"gpu_scales\": [\n";
-    os << "      {\n";
-    os << "        \"level\": 0,\n";
-    os << "        \"width\": " << compute.scale0.width << ",\n";
-    os << "        \"height\": " << compute.scale0.height << ",\n";
-    os << "        \"metric\": \"dssim_3x3_gaussian_luma_linear_srgb\",\n";
-    os << "        \"window_radius\": " << kStage0WindowRadius << ",\n";
-    os << "        \"window_size\": " << kStage0WindowSize << ",\n";
-    os << "        \"window_type\": \"gaussian_1_2_1\",\n";
-    os << "        \"qscale\": " << kStage0QScale << ",\n";
-    os << "        \"sum_u64\": " << compute.scale0.dssimQSum << ",\n";
-    os << "        \"elem_count\": " << compute.scale0.dssimQ.size() << ",\n";
-    os << "        \"mean_f64\": " << std::setprecision(17) << compute.scale0.score << "\n";
-    os << "      },\n";
-    os << "      {\n";
-    os << "        \"level\": 1,\n";
-    os << "        \"width\": " << compute.scale1.width << ",\n";
-    os << "        \"height\": " << compute.scale1.height << ",\n";
-    os << "        \"metric\": \"dssim_3x3_gaussian_luma_linear_srgb\",\n";
-    os << "        \"window_radius\": " << kStage0WindowRadius << ",\n";
-    os << "        \"window_size\": " << kStage0WindowSize << ",\n";
-    os << "        \"window_type\": \"gaussian_1_2_1\",\n";
-    os << "        \"qscale\": " << kStage0QScale << ",\n";
-    os << "        \"sum_u64\": " << compute.scale1.dssimQSum << ",\n";
-    os << "        \"elem_count\": " << compute.scale1.dssimQ.size() << ",\n";
-    os << "        \"mean_f64\": " << std::setprecision(17) << compute.scale1.score << "\n";
-    os << "      }\n";
+    for (std::size_t i = 0; i < compute.scales.size(); ++i) {
+        const auto& scale = compute.scales[i];
+        os << "      {\n";
+        os << "        \"level\": " << i << ",\n";
+        os << "        \"width\": " << scale.width << ",\n";
+        os << "        \"height\": " << scale.height << ",\n";
+        os << "        \"metric\": \"dssim_5x5_gaussian_luma_linear_srgb\",\n";
+        os << "        \"window_radius\": " << kStage0WindowRadius << ",\n";
+        os << "        \"window_size\": " << kStage0WindowSize << ",\n";
+        os << "        \"window_type\": \"gaussian_blur_kernel_x2\",\n";
+        os << "        \"qscale\": " << kStage0QScale << ",\n";
+        os << "        \"weight\": " << std::setprecision(17) << kDefaultScaleWeights[i] << ",\n";
+        os << "        \"sum_u64\": " << scale.dssimQSum << ",\n";
+        os << "        \"elem_count\": " << scale.dssimQ.size() << ",\n";
+        os << "        \"mean_dssim_f64\": " << std::setprecision(17) << scale.meanDssim << ",\n";
+        os << "        \"ssim_score_f64\": " << std::setprecision(17) << scale.ssimScore << "\n";
+        os << "      }";
+        if (i + 1 < compute.scales.size()) {
+            os << ",";
+        }
+        os << "\n";
+    }
     os << "    ],\n";
     os << "    \"aggregation\": {\n";
-    os << "      \"method\": \"mean_of_2_scales\",\n";
-    os << "      \"weights\": [0.5, 0.5]\n";
+    os << "      \"method\": \"reference_like_weighted_ssim_to_dssim\",\n";
+    os << "      \"used_scale_count\": " << compute.scales.size() << ",\n";
+    os << "      \"weighted_ssim_f64\": " << std::setprecision(17) << compute.weightedSsim << "\n";
     os << "    }\n";
     os << "  },\n";
     os << "  \"adapter\": \"" << EscapeJson(adapterName) << "\"";
@@ -427,17 +457,7 @@ std::string BuildJson(
         os << "      \"elem_type\": \"u8\",\n";
         os << "      \"elem_count\": " << decoded2.byteCount << "\n";
         os << "    },\n";
-        os << "    \"image1_scale1_rgba8\": {\n";
-        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->image1Scale1Path).string()) << "\",\n";
-        os << "      \"elem_type\": \"u8\",\n";
-        os << "      \"elem_count\": " << (compute.scale1.dssimQ.size() * 4u) << "\n";
-        os << "    },\n";
-        os << "    \"image2_scale1_rgba8\": {\n";
-        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->image2Scale1Path).string()) << "\",\n";
-        os << "      \"elem_type\": \"u8\",\n";
-        os << "      \"elem_count\": " << (compute.scale1.dssimQ.size() * 4u) << "\n";
-        os << "    },\n";
-        os << "    \"stage0_dssim3x3_gaussian_linear_u32le\": {\n";
+        os << "    \"stage0_dssim5x5_gaussian_linear_u32le\": {\n";
         os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage0DssimPath).string()) << "\",\n";
         os << "      \"elem_type\": \"u32_le\",\n";
         os << "      \"elem_count\": " << debugInfo->stage0ElemCount << "\n";
@@ -467,11 +487,6 @@ std::string BuildJson(
         os << "      \"elem_type\": \"f32_le\",\n";
         os << "      \"elem_count\": " << debugInfo->stage0ElemCount << "\n";
         os << "    },\n";
-        os << "    \"stage1_dssim3x3_gaussian_linear_u32le\": {\n";
-        os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage1DssimPath).string()) << "\",\n";
-        os << "      \"elem_type\": \"u32_le\",\n";
-        os << "      \"elem_count\": " << debugInfo->stage1ElemCount << "\n";
-        os << "    },\n";
         os << "    \"stage0_dssim3x3_u32le\": {\n";
         os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage0DssimPath).string()) << "\",\n";
         os << "      \"elem_type\": \"u32_le\",\n";
@@ -481,7 +496,28 @@ std::string BuildJson(
         os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage0DssimPath).string()) << "\",\n";
         os << "      \"elem_type\": \"u32_le\",\n";
         os << "      \"elem_count\": " << debugInfo->stage0ElemCount << "\n";
-        os << "    }\n";
+        os << "    }";
+        if (debugInfo->stage1ElemCount > 0) {
+            os << ",\n";
+            os << "    \"image1_scale1_rgba8\": {\n";
+            os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->image1Scale1Path).string()) << "\",\n";
+            os << "      \"elem_type\": \"u8\",\n";
+            os << "      \"elem_count\": " << (debugInfo->stage1ElemCount * 4u) << "\n";
+            os << "    },\n";
+            os << "    \"image2_scale1_rgba8\": {\n";
+            os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->image2Scale1Path).string()) << "\",\n";
+            os << "      \"elem_type\": \"u8\",\n";
+            os << "      \"elem_count\": " << (debugInfo->stage1ElemCount * 4u) << "\n";
+            os << "    },\n";
+            os << "    \"stage1_dssim5x5_gaussian_linear_u32le\": {\n";
+            os << "      \"path\": \"" << EscapeJson(std::filesystem::absolute(debugInfo->stage1DssimPath).string()) << "\",\n";
+            os << "      \"elem_type\": \"u32_le\",\n";
+            os << "      \"elem_count\": " << debugInfo->stage1ElemCount << "\n";
+            os << "    }";
+            os << "\n";
+        } else {
+            os << "\n";
+        }
         os << "  }";
     }
 
@@ -568,12 +604,14 @@ std::vector<std::uint8_t> ReadBufferBlocking(
 ScaleOutputs RunStage0Compute(
     const wgpu::Instance& instance,
     const wgpu::Device& device,
-    const std::vector<std::uint32_t>& input1,
-    const std::vector<std::uint32_t>& input2,
+    const std::vector<LinearRgba>& input1,
+    const std::vector<LinearRgba>& input2,
     std::uint32_t width,
     std::uint32_t height,
+    std::size_t scaleLevel,
     bool readIntermediateStats,
-    const std::string& shaderSource) {
+    const std::string& preprocessShaderSource,
+    const std::string& stage0ShaderSource) {
     if (input1.size() != input2.size()) {
         throw std::runtime_error("input buffer size mismatch");
     }
@@ -590,6 +628,8 @@ ScaleOutputs RunStage0Compute(
         throw std::runtime_error("pixel count mismatch between input buffers and dimensions");
     }
 
+    const std::size_t rgbaBytes = elemCount * sizeof(LinearRgba);
+    const std::size_t labBytes = elemCount * sizeof(float) * 4u;
     const std::size_t u32Bytes = elemCount * sizeof(std::uint32_t);
     const std::size_t f32Bytes = elemCount * sizeof(float);
 
@@ -606,9 +646,23 @@ ScaleOutputs RunStage0Compute(
         kStage0QScale,
     };
 
+    wgpu::BufferDescriptor rgbaStorageDesc = {};
+    rgbaStorageDesc.size = static_cast<std::uint64_t>(rgbaBytes);
+    rgbaStorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+    rgbaStorageDesc.mappedAtCreation = false;
+
+    wgpu::Buffer input1Buffer = device.CreateBuffer(&rgbaStorageDesc);
+    wgpu::Buffer input2Buffer = device.CreateBuffer(&rgbaStorageDesc);
+    wgpu::BufferDescriptor labStorageDesc = {};
+    labStorageDesc.size = static_cast<std::uint64_t>(labBytes);
+    labStorageDesc.usage = wgpu::BufferUsage::Storage;
+    labStorageDesc.mappedAtCreation = false;
+    wgpu::Buffer lab1Buffer = device.CreateBuffer(&labStorageDesc);
+    wgpu::Buffer lab2Buffer = device.CreateBuffer(&labStorageDesc);
+
     wgpu::BufferDescriptor u32StorageDesc = {};
     u32StorageDesc.size = static_cast<std::uint64_t>(u32Bytes);
-    u32StorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc;
+    u32StorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
     u32StorageDesc.mappedAtCreation = false;
 
     wgpu::BufferDescriptor f32StorageDesc = {};
@@ -616,16 +670,14 @@ ScaleOutputs RunStage0Compute(
     f32StorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
     f32StorageDesc.mappedAtCreation = false;
 
-    wgpu::Buffer input1Buffer = device.CreateBuffer(&u32StorageDesc);
-    wgpu::Buffer input2Buffer = device.CreateBuffer(&u32StorageDesc);
     wgpu::Buffer outDssimQBuffer = device.CreateBuffer(&u32StorageDesc);
     wgpu::Buffer outMu1Buffer = device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outMu2Buffer = device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outVar1Buffer = device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outVar2Buffer = device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outCov12Buffer = device.CreateBuffer(&f32StorageDesc);
-    if (!input1Buffer || !input2Buffer || !outDssimQBuffer || !outMu1Buffer || !outMu2Buffer || !outVar1Buffer ||
-        !outVar2Buffer || !outCov12Buffer) {
+    if (!input1Buffer || !input2Buffer || !lab1Buffer || !lab2Buffer || !outDssimQBuffer || !outMu1Buffer ||
+        !outMu2Buffer || !outVar1Buffer || !outVar2Buffer || !outCov12Buffer) {
         throw std::runtime_error("failed to create stage0 buffers");
     }
 
@@ -669,13 +721,86 @@ ScaleOutputs RunStage0Compute(
     }
 
     wgpu::Queue queue = device.GetQueue();
-    queue.WriteBuffer(input1Buffer, 0, input1.data(), u32Bytes);
-    queue.WriteBuffer(input2Buffer, 0, input2.data(), u32Bytes);
+    queue.WriteBuffer(input1Buffer, 0, input1.data(), rgbaBytes);
+    queue.WriteBuffer(input2Buffer, 0, input2.data(), rgbaBytes);
     queue.WriteBuffer(paramsBuffer, 0, &paramsData, sizeof(ParamsData));
 
-    wgpu::ShaderModule shader = CreateShaderModule(device, shaderSource);
-    if (!shader) {
-        throw std::runtime_error("failed to create stage0 shader module");
+    wgpu::ShaderModule preprocessShader = CreateShaderModule(device, preprocessShaderSource);
+    wgpu::ShaderModule stage0Shader = CreateShaderModule(device, stage0ShaderSource);
+    if (!preprocessShader || !stage0Shader) {
+        throw std::runtime_error("failed to create stage0/preprocess shader module");
+    }
+
+    wgpu::BindGroupLayoutEntry preprocessLayoutEntries[3] = {};
+    preprocessLayoutEntries[0].binding = 0;
+    preprocessLayoutEntries[0].visibility = wgpu::ShaderStage::Compute;
+    preprocessLayoutEntries[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+    preprocessLayoutEntries[1].binding = 1;
+    preprocessLayoutEntries[1].visibility = wgpu::ShaderStage::Compute;
+    preprocessLayoutEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
+    preprocessLayoutEntries[2].binding = 2;
+    preprocessLayoutEntries[2].visibility = wgpu::ShaderStage::Compute;
+    preprocessLayoutEntries[2].buffer.type = wgpu::BufferBindingType::Uniform;
+    preprocessLayoutEntries[2].buffer.minBindingSize = sizeof(ParamsData);
+    wgpu::BindGroupLayoutDescriptor preprocessBglDesc = {};
+    preprocessBglDesc.entryCount = 3;
+    preprocessBglDesc.entries = preprocessLayoutEntries;
+    wgpu::BindGroupLayout preprocessBgl = device.CreateBindGroupLayout(&preprocessBglDesc);
+    if (!preprocessBgl) {
+        throw std::runtime_error("failed to create preprocess bind group layout");
+    }
+
+    wgpu::PipelineLayoutDescriptor preprocessPlDesc = {};
+    preprocessPlDesc.bindGroupLayoutCount = 1;
+    preprocessPlDesc.bindGroupLayouts = &preprocessBgl;
+    wgpu::PipelineLayout preprocessPl = device.CreatePipelineLayout(&preprocessPlDesc);
+    if (!preprocessPl) {
+        throw std::runtime_error("failed to create preprocess pipeline layout");
+    }
+
+    wgpu::ComputePipelineDescriptor preprocessPipeDesc = {};
+    preprocessPipeDesc.layout = preprocessPl;
+    preprocessPipeDesc.compute.module = preprocessShader;
+    preprocessPipeDesc.compute.entryPoint = "main";
+    wgpu::ComputePipeline preprocessPipe = device.CreateComputePipeline(&preprocessPipeDesc);
+    if (!preprocessPipe) {
+        throw std::runtime_error("failed to create preprocess pipeline");
+    }
+
+    wgpu::BindGroupEntry preprocessBg1Entries[3] = {};
+    preprocessBg1Entries[0].binding = 0;
+    preprocessBg1Entries[0].buffer = input1Buffer;
+    preprocessBg1Entries[0].size = static_cast<std::uint64_t>(rgbaBytes);
+    preprocessBg1Entries[1].binding = 1;
+    preprocessBg1Entries[1].buffer = lab1Buffer;
+    preprocessBg1Entries[1].size = static_cast<std::uint64_t>(labBytes);
+    preprocessBg1Entries[2].binding = 2;
+    preprocessBg1Entries[2].buffer = paramsBuffer;
+    preprocessBg1Entries[2].size = static_cast<std::uint64_t>(sizeof(ParamsData));
+
+    wgpu::BindGroupEntry preprocessBg2Entries[3] = {};
+    preprocessBg2Entries[0].binding = 0;
+    preprocessBg2Entries[0].buffer = input2Buffer;
+    preprocessBg2Entries[0].size = static_cast<std::uint64_t>(rgbaBytes);
+    preprocessBg2Entries[1].binding = 1;
+    preprocessBg2Entries[1].buffer = lab2Buffer;
+    preprocessBg2Entries[1].size = static_cast<std::uint64_t>(labBytes);
+    preprocessBg2Entries[2].binding = 2;
+    preprocessBg2Entries[2].buffer = paramsBuffer;
+    preprocessBg2Entries[2].size = static_cast<std::uint64_t>(sizeof(ParamsData));
+
+    wgpu::BindGroupDescriptor preprocessBg1Desc = {};
+    preprocessBg1Desc.layout = preprocessBgl;
+    preprocessBg1Desc.entryCount = 3;
+    preprocessBg1Desc.entries = preprocessBg1Entries;
+    wgpu::BindGroup preprocessBg1 = device.CreateBindGroup(&preprocessBg1Desc);
+    wgpu::BindGroupDescriptor preprocessBg2Desc = {};
+    preprocessBg2Desc.layout = preprocessBgl;
+    preprocessBg2Desc.entryCount = 3;
+    preprocessBg2Desc.entries = preprocessBg2Entries;
+    wgpu::BindGroup preprocessBg2 = device.CreateBindGroup(&preprocessBg2Desc);
+    if (!preprocessBg1 || !preprocessBg2) {
+        throw std::runtime_error("failed to create preprocess bind groups");
     }
 
     wgpu::BindGroupLayoutEntry layoutEntries[9] = {};
@@ -712,7 +837,7 @@ ScaleOutputs RunStage0Compute(
 
     wgpu::ComputePipelineDescriptor pipelineDesc = {};
     pipelineDesc.layout = pipelineLayout;
-    pipelineDesc.compute.module = shader;
+    pipelineDesc.compute.module = stage0Shader;
     pipelineDesc.compute.entryPoint = "main";
     wgpu::ComputePipeline pipeline = device.CreateComputePipeline(&pipelineDesc);
     if (!pipeline) {
@@ -721,14 +846,14 @@ ScaleOutputs RunStage0Compute(
 
     wgpu::BindGroupEntry bgEntries[9] = {};
     bgEntries[0].binding = 0;
-    bgEntries[0].buffer = input1Buffer;
+    bgEntries[0].buffer = lab1Buffer;
     bgEntries[0].offset = 0;
-    bgEntries[0].size = static_cast<std::uint64_t>(u32Bytes);
+    bgEntries[0].size = static_cast<std::uint64_t>(labBytes);
 
     bgEntries[1].binding = 1;
-    bgEntries[1].buffer = input2Buffer;
+    bgEntries[1].buffer = lab2Buffer;
     bgEntries[1].offset = 0;
-    bgEntries[1].size = static_cast<std::uint64_t>(u32Bytes);
+    bgEntries[1].size = static_cast<std::uint64_t>(labBytes);
 
     bgEntries[2].binding = 2;
     bgEntries[2].buffer = outDssimQBuffer;
@@ -778,6 +903,17 @@ ScaleOutputs RunStage0Compute(
     {
         wgpu::ComputePassDescriptor passDesc = {};
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
+        pass.SetPipeline(preprocessPipe);
+        pass.SetBindGroup(0, preprocessBg1);
+        const std::uint32_t workgroupCount = static_cast<std::uint32_t>((elemCount + 63) / 64);
+        pass.DispatchWorkgroups(workgroupCount, 1, 1);
+        pass.SetBindGroup(0, preprocessBg2);
+        pass.DispatchWorkgroups(workgroupCount, 1, 1);
+        pass.End();
+    }
+    {
+        wgpu::ComputePassDescriptor passDesc = {};
+        wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(pipeline);
         pass.SetBindGroup(0, bindGroup);
         const std::uint32_t workgroupCount = static_cast<std::uint32_t>((elemCount + 63) / 64);
@@ -803,14 +939,12 @@ ScaleOutputs RunStage0Compute(
     const auto dssimBytes = ReadBufferBlocking(instance, readbackDssimQBuffer, u32Bytes);
     outputs.dssimQ.resize(elemCount);
     std::memcpy(outputs.dssimQ.data(), dssimBytes.data(), u32Bytes);
-
     if (readIntermediateStats) {
         const auto mu1Bytes = ReadBufferBlocking(instance, readbackMu1Buffer, f32Bytes);
         const auto mu2Bytes = ReadBufferBlocking(instance, readbackMu2Buffer, f32Bytes);
         const auto var1Bytes = ReadBufferBlocking(instance, readbackVar1Buffer, f32Bytes);
         const auto var2Bytes = ReadBufferBlocking(instance, readbackVar2Buffer, f32Bytes);
         const auto cov12Bytes = ReadBufferBlocking(instance, readbackCov12Buffer, f32Bytes);
-
         outputs.mu1.resize(elemCount);
         outputs.mu2.resize(elemCount);
         outputs.var1.resize(elemCount);
@@ -828,15 +962,32 @@ ScaleOutputs RunStage0Compute(
         sum += static_cast<std::uint64_t>(v);
     }
     outputs.dssimQSum = sum;
-    outputs.score =
+    outputs.meanDssim =
         static_cast<double>(sum) / (static_cast<double>(elemCount) * static_cast<double>(paramsData.qscale));
+
+    std::vector<double> ssimMap(elemCount);
+    double ssimSum = 0.0;
+    for (std::size_t i = 0; i < elemCount; ++i) {
+        const double dssim = static_cast<double>(outputs.dssimQ[i]) / static_cast<double>(paramsData.qscale);
+        const double ssim = 1.0 - 2.0 * dssim;
+        ssimMap[i] = ssim;
+        ssimSum += ssim;
+    }
+    const double meanSsim = ssimSum / static_cast<double>(elemCount);
+    const double avg =
+        std::pow(std::max(meanSsim, 0.0), std::pow(0.5, static_cast<double>(scaleLevel)));
+    double devSum = 0.0;
+    for (double s : ssimMap) {
+        devSum += std::abs(avg - s);
+    }
+    outputs.ssimScore = 1.0 - (devSum / static_cast<double>(elemCount));
     return outputs;
 }
 
 DownsampleOutputs RunDownsample2x2Compute(
     const wgpu::Instance& instance,
     const wgpu::Device& device,
-    const std::vector<std::uint32_t>& input,
+    const std::vector<LinearRgba>& input,
     std::uint32_t inWidth,
     std::uint32_t inHeight,
     const std::string& shaderSource) {
@@ -844,12 +995,15 @@ DownsampleOutputs RunDownsample2x2Compute(
     if (input.size() != inCount) {
         throw std::runtime_error("downsample input size mismatch");
     }
-    const std::uint32_t outWidth = (inWidth + 1u) / 2u;
-    const std::uint32_t outHeight = (inHeight + 1u) / 2u;
+    const std::uint32_t outWidth = inWidth / 2u;
+    const std::uint32_t outHeight = inHeight / 2u;
+    if (outWidth == 0 || outHeight == 0) {
+        throw std::runtime_error("downsample output dimensions are zero");
+    }
     const std::size_t outCount = static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight);
 
-    const std::size_t inBytes = inCount * sizeof(std::uint32_t);
-    const std::size_t outBytes = outCount * sizeof(std::uint32_t);
+    const std::size_t inBytes = inCount * sizeof(LinearRgba);
+    const std::size_t outBytes = outCount * sizeof(LinearRgba);
 
     struct ParamsData {
         std::uint32_t inWidth;
@@ -1052,8 +1206,10 @@ int main(int argc, char** argv) {
         const CliOptions options = ParseArgs(argc, argv);
         const auto stage0ShaderPath = ResolveShaderPath(argv[0], "stage0_absdiff.wgsl");
         const auto downsampleShaderPath = ResolveShaderPath(argv[0], "downsample_2x2.wgsl");
+        const auto labPreprocessShaderPath = ResolveShaderPath(argv[0], "lab_preprocess.wgsl");
         const auto stage0ShaderSource = ReadAllText(stage0ShaderPath);
         const auto downsampleShaderSource = ReadAllText(downsampleShaderPath);
+        const auto labPreprocessShaderSource = ReadAllText(labPreprocessShaderPath);
         const DecodedImage image1 = LoadPngRgba8(options.image1);
         const DecodedImage image2 = LoadPngRgba8(options.image2);
         if (image1.pixels.empty() || image2.pixels.empty()) {
@@ -1077,8 +1233,8 @@ int main(int argc, char** argv) {
             image2.pixels.size(),
         };
 
-        const auto input1 = PackRgba8ToU32(image1.pixels);
-        const auto input2 = PackRgba8ToU32(image2.pixels);
+        const auto input1 = ConvertRgba8ToLinearPlu(image1.pixels);
+        const auto input2 = ConvertRgba8ToLinearPlu(image2.pixels);
 
         dawnProcSetProcs(&dawn::native::GetProcs());
 
@@ -1102,44 +1258,70 @@ int main(int argc, char** argv) {
             }
         }
 
-        const ScaleOutputs scale0 = RunStage0Compute(
-            instance,
-            device,
-            input1,
-            input2,
-            image1.width,
-            image1.height,
-            options.debugDumpEnabled,
-            stage0ShaderSource);
-
-        const DownsampleOutputs image1Scale1 = RunDownsample2x2Compute(
-            instance,
-            device,
-            input1,
-            image1.width,
-            image1.height,
-            downsampleShaderSource);
-        const DownsampleOutputs image2Scale1 = RunDownsample2x2Compute(
-            instance,
-            device,
-            input2,
-            image2.width,
-            image2.height,
-            downsampleShaderSource);
-        const ScaleOutputs scale1 = RunStage0Compute(
-            instance,
-            device,
-            image1Scale1.pixels,
-            image2Scale1.pixels,
-            image1Scale1.width,
-            image1Scale1.height,
-            false,
-            stage0ShaderSource);
-
         MultiScaleOutputs compute;
-        compute.scale0 = std::move(scale0);
-        compute.scale1 = std::move(scale1);
-        compute.score = (compute.scale0.score + compute.scale1.score) * 0.5;
+        std::vector<LinearRgba> curr1 = input1;
+        std::vector<LinearRgba> curr2 = input2;
+        std::uint32_t currWidth = image1.width;
+        std::uint32_t currHeight = image1.height;
+
+        DownsampleOutputs firstDownsample1;
+        DownsampleOutputs firstDownsample2;
+
+        for (std::size_t level = 0; level < kDefaultScaleWeights.size(); ++level) {
+            const bool readStats = options.debugDumpEnabled && level == 0;
+            ScaleOutputs scale = RunStage0Compute(
+                instance,
+                device,
+                curr1,
+                curr2,
+                currWidth,
+                currHeight,
+                level,
+                readStats,
+                labPreprocessShaderSource,
+                stage0ShaderSource);
+            compute.scales.push_back(std::move(scale));
+
+            if (level + 1 >= kDefaultScaleWeights.size()) {
+                break;
+            }
+            if (currWidth < 8 || currHeight < 8) {
+                break;
+            }
+
+            DownsampleOutputs next1 = RunDownsample2x2Compute(
+                instance,
+                device,
+                curr1,
+                currWidth,
+                currHeight,
+                downsampleShaderSource);
+            DownsampleOutputs next2 = RunDownsample2x2Compute(
+                instance,
+                device,
+                curr2,
+                currWidth,
+                currHeight,
+                downsampleShaderSource);
+            if (level == 0) {
+                firstDownsample1 = next1;
+                firstDownsample2 = next2;
+            }
+            currWidth = next1.width;
+            currHeight = next1.height;
+            curr1 = std::move(next1.pixels);
+            curr2 = std::move(next2.pixels);
+        }
+
+        double weightedSum = 0.0;
+        double weightTotal = 0.0;
+        for (std::size_t i = 0; i < compute.scales.size(); ++i) {
+            const double w = kDefaultScaleWeights[i];
+            weightedSum += compute.scales[i].ssimScore * w;
+            weightTotal += w;
+        }
+        compute.weightedSsim = weightedSum / weightTotal;
+        compute.score = 1.0 / std::max(compute.weightedSsim, std::numeric_limits<double>::epsilon()) - 1.0;
 
         DebugDumpInfo debugInfo;
         DebugDumpInfo* debugInfoPtr = nullptr;
@@ -1147,28 +1329,30 @@ int main(int argc, char** argv) {
             std::filesystem::create_directories(options.debugDumpDir);
             debugInfo.image1RgbaPath = options.debugDumpDir / "image1_rgba8.gpu.bin";
             debugInfo.image2RgbaPath = options.debugDumpDir / "image2_rgba8.gpu.bin";
-            debugInfo.image1Scale1Path = options.debugDumpDir / "image1_scale1_rgba8.gpu.bin";
-            debugInfo.image2Scale1Path = options.debugDumpDir / "image2_scale1_rgba8.gpu.bin";
-            debugInfo.stage0DssimPath = options.debugDumpDir / "stage0_dssim3x3_gaussian_linear_u32le.gpu.bin";
+            debugInfo.stage0DssimPath = options.debugDumpDir / "stage0_dssim5x5_gaussian_linear_u32le.gpu.bin";
             debugInfo.stage0Mu1Path = options.debugDumpDir / "stage0_mu1_f32le.gpu.bin";
             debugInfo.stage0Mu2Path = options.debugDumpDir / "stage0_mu2_f32le.gpu.bin";
             debugInfo.stage0Var1Path = options.debugDumpDir / "stage0_var1_f32le.gpu.bin";
             debugInfo.stage0Var2Path = options.debugDumpDir / "stage0_var2_f32le.gpu.bin";
             debugInfo.stage0Cov12Path = options.debugDumpDir / "stage0_cov12_f32le.gpu.bin";
-            debugInfo.stage1DssimPath = options.debugDumpDir / "stage1_dssim3x3_gaussian_linear_u32le.gpu.bin";
-            debugInfo.stage0ElemCount = compute.scale0.dssimQ.size();
-            debugInfo.stage1ElemCount = compute.scale1.dssimQ.size();
+            debugInfo.stage0ElemCount = compute.scales.empty() ? 0 : compute.scales[0].dssimQ.size();
             WriteU8Buffer(debugInfo.image1RgbaPath, image1.pixels);
             WriteU8Buffer(debugInfo.image2RgbaPath, image2.pixels);
-            WriteU8Buffer(debugInfo.image1Scale1Path, UnpackU32ToRgba8(image1Scale1.pixels));
-            WriteU8Buffer(debugInfo.image2Scale1Path, UnpackU32ToRgba8(image2Scale1.pixels));
-            WriteU32LeBuffer(debugInfo.stage0DssimPath, compute.scale0.dssimQ);
-            WriteF32LeBuffer(debugInfo.stage0Mu1Path, compute.scale0.mu1);
-            WriteF32LeBuffer(debugInfo.stage0Mu2Path, compute.scale0.mu2);
-            WriteF32LeBuffer(debugInfo.stage0Var1Path, compute.scale0.var1);
-            WriteF32LeBuffer(debugInfo.stage0Var2Path, compute.scale0.var2);
-            WriteF32LeBuffer(debugInfo.stage0Cov12Path, compute.scale0.cov12);
-            WriteU32LeBuffer(debugInfo.stage1DssimPath, compute.scale1.dssimQ);
+            WriteU32LeBuffer(debugInfo.stage0DssimPath, compute.scales[0].dssimQ);
+            WriteF32LeBuffer(debugInfo.stage0Mu1Path, compute.scales[0].mu1);
+            WriteF32LeBuffer(debugInfo.stage0Mu2Path, compute.scales[0].mu2);
+            WriteF32LeBuffer(debugInfo.stage0Var1Path, compute.scales[0].var1);
+            WriteF32LeBuffer(debugInfo.stage0Var2Path, compute.scales[0].var2);
+            WriteF32LeBuffer(debugInfo.stage0Cov12Path, compute.scales[0].cov12);
+            if (compute.scales.size() > 1 && !firstDownsample1.pixels.empty() && !firstDownsample2.pixels.empty()) {
+                debugInfo.image1Scale1Path = options.debugDumpDir / "image1_scale1_rgba8.gpu.bin";
+                debugInfo.image2Scale1Path = options.debugDumpDir / "image2_scale1_rgba8.gpu.bin";
+                debugInfo.stage1DssimPath = options.debugDumpDir / "stage1_dssim5x5_gaussian_linear_u32le.gpu.bin";
+                debugInfo.stage1ElemCount = compute.scales[1].dssimQ.size();
+                WriteU8Buffer(debugInfo.image1Scale1Path, ConvertLinearPluToRgba8(firstDownsample1.pixels));
+                WriteU8Buffer(debugInfo.image2Scale1Path, ConvertLinearPluToRgba8(firstDownsample2.pixels));
+                WriteU32LeBuffer(debugInfo.stage1DssimPath, compute.scales[1].dssimQ);
+            }
             debugInfoPtr = &debugInfo;
         }
 
