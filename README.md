@@ -15,7 +15,7 @@ As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
 ### Build and run (PowerShell)
 
 ```powershell
-cmake -S . -B build -DDSSIM_ENABLE_DAWN_SAMPLE=ON `
+cmake -S . -B build `
   -DDSSIM_DAWN_ROOT="<path-to-dawn-src>" `
   -DDSSIM_DAWN_OUT_DIR="<path-to-dawn-out-release>"
 
@@ -31,7 +31,21 @@ $env:PATH = "<path-to-dawn-out-release>;$env:PATH"
 
 If `--out` is omitted, the score is printed to stdout.
 
-If Dawn is not available (for example after deleting third_party/dawn), configure/build still succeeds and only dssim_gpu_dummy is built.
+If Dawn is not available (for example after deleting `third_party/dawn`), CMake tries to auto-install it by default.  
+You can explicitly disable the sample with `-DDSSIM_ENABLE_DAWN_SAMPLE=OFF`.
+
+### Auto-install Dawn (Windows)
+
+By default, CMake fetches/builds Dawn automatically when it is missing:
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Release --target dssim_gpu_dawn_checksum
+```
+
+This invokes `tools/install_dawn.ps1`, which installs `third_party/depot_tools`, fetches `third_party/dawn`, and builds `dawn_native`, `dawn_proc`, and `webgpu_dawn`.
+
+To disable this behavior, pass `-DDSSIM_AUTO_INSTALL_DAWN=OFF`.
 
 ### Notes
 

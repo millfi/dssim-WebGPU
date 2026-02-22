@@ -1,7 +1,7 @@
 dssim
 target/
 agents.md
-build/
+build*/
 out/
 third_party/dawn/
 third_party/depot_tools/

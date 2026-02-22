@@ -1,47 +1,13 @@
 cmake_minimum_required(VERSION 3.24)
 
 
-option(DSSIM_ENABLE_DAWN_SAMPLE "Build Dawn native compute sample target" OFF)
+option(DSSIM_ENABLE_DAWN_SAMPLE "Build Dawn native compute sample target" ON)
+option(DSSIM_AUTO_INSTALL_DAWN "Automatically fetch and build Dawn when missing (Windows only)" ON)
 set(DSSIM_DAWN_ROOT "${CMAKE_SOURCE_DIR}/third_party/dawn" CACHE PATH "Path to Dawn source root")
 set(DSSIM_DAWN_OUT_DIR "${DSSIM_DAWN_ROOT}/out/Release" CACHE PATH "Path to Dawn GN build output directory")
 set(DSSIM_BUILD_DAWN_SAMPLE OFF)
 
-if(DSSIM_ENABLE_DAWN_SAMPLE)
-    include(FetchContent)
-
-    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(dssim_zlib
-        URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
-    )
-    FetchContent_MakeAvailable(dssim_zlib)
-    if(TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
-        add_library(ZLIB::ZLIB ALIAS zlibstatic)
-    endif()
-
-    set(PNG_BUILD_ZLIB ON CACHE BOOL "" FORCE)
-    set(PNG_SHARED OFF CACHE BOOL "" FORCE)
-    set(PNG_STATIC ON CACHE BOOL "" FORCE)
-    set(PNG_TESTS OFF CACHE BOOL "" FORCE)
-    set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
-    set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
-    set(PNG_HARDWARE_OPTIMIZATIONS OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(dssim_libpng
-        URL https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.44.zip
-    )
-    FetchContent_MakeAvailable(dssim_libpng)
-
-    if(TARGET PNG::PNG)
-        set(DSSIM_PNG_TARGET PNG::PNG)
-    elseif(TARGET png_static)
-        set(DSSIM_PNG_TARGET png_static)
-    elseif(TARGET png)
-        set(DSSIM_PNG_TARGET png)
-    else()
-        message(FATAL_ERROR "libpng target not found after FetchContent")
-    endif()
-
+function(dssim_probe_dawn)
     find_path(DSSIM_DAWN_INCLUDE_DIR
         NAMES dawn/webgpu_cpp.h
         PATHS
@@ -83,12 +49,88 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
         DSSIM_DAWN_DAWN_PROC_LIB AND
         DSSIM_DAWN_DAWN_NATIVE_LIB
     )
-        set(DSSIM_BUILD_DAWN_SAMPLE ON)
+        set(DSSIM_BUILD_DAWN_SAMPLE ON PARENT_SCOPE)
     else()
+        set(DSSIM_BUILD_DAWN_SAMPLE OFF PARENT_SCOPE)
+    endif()
+
+    set(DSSIM_DAWN_INCLUDE_DIR "${DSSIM_DAWN_INCLUDE_DIR}" PARENT_SCOPE)
+    set(DSSIM_DAWN_SRC_INCLUDE_DIR "${DSSIM_DAWN_SRC_INCLUDE_DIR}" PARENT_SCOPE)
+    set(DSSIM_DAWN_WEBGPU_DAWN_LIB "${DSSIM_DAWN_WEBGPU_DAWN_LIB}" PARENT_SCOPE)
+    set(DSSIM_DAWN_DAWN_PROC_LIB "${DSSIM_DAWN_DAWN_PROC_LIB}" PARENT_SCOPE)
+    set(DSSIM_DAWN_DAWN_NATIVE_LIB "${DSSIM_DAWN_DAWN_NATIVE_LIB}" PARENT_SCOPE)
+endfunction()
+
+if(DSSIM_ENABLE_DAWN_SAMPLE)
+    include(FetchContent)
+
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(dssim_zlib
+        URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
+    )
+    FetchContent_MakeAvailable(dssim_zlib)
+    if(TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
+        add_library(ZLIB::ZLIB ALIAS zlibstatic)
+    endif()
+
+    set(PNG_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+    set(PNG_SHARED OFF CACHE BOOL "" FORCE)
+    set(PNG_STATIC ON CACHE BOOL "" FORCE)
+    set(PNG_TESTS OFF CACHE BOOL "" FORCE)
+    set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
+    set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
+    set(PNG_HARDWARE_OPTIMIZATIONS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(dssim_libpng
+        URL https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.44.zip
+    )
+    FetchContent_MakeAvailable(dssim_libpng)
+
+    if(TARGET PNG::PNG)
+        set(DSSIM_PNG_TARGET PNG::PNG)
+    elseif(TARGET png_static)
+        set(DSSIM_PNG_TARGET png_static)
+    elseif(TARGET png)
+        set(DSSIM_PNG_TARGET png)
+    else()
+        message(FATAL_ERROR "libpng target not found after FetchContent")
+    endif()
+
+    dssim_probe_dawn()
+
+    if(NOT DSSIM_BUILD_DAWN_SAMPLE AND DSSIM_AUTO_INSTALL_DAWN)
+        if(NOT WIN32)
+            message(FATAL_ERROR "DSSIM_AUTO_INSTALL_DAWN=ON is currently supported on Windows only.")
+        endif()
+
+        find_program(DSSIM_PWSH NAMES pwsh powershell REQUIRED)
+        message(STATUS "Dawn not found. Running automatic Dawn setup script.")
+        execute_process(
+            COMMAND
+                "${DSSIM_PWSH}" -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_SOURCE_DIR}/tools/install_dawn.ps1"
+                -DawnRoot "${DSSIM_DAWN_ROOT}"
+                -DawnOutDir "${DSSIM_DAWN_OUT_DIR}"
+                -DepotToolsDir "${CMAKE_SOURCE_DIR}/third_party/depot_tools"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            RESULT_VARIABLE DSSIM_DAWN_SETUP_RESULT
+        )
+        if(NOT DSSIM_DAWN_SETUP_RESULT EQUAL 0)
+            message(FATAL_ERROR
+                "Automatic Dawn setup failed (exit code ${DSSIM_DAWN_SETUP_RESULT}). "
+                "Run tools/install_dawn.ps1 manually or set DSSIM_DAWN_ROOT/DSSIM_DAWN_OUT_DIR."
+            )
+        endif()
+        dssim_probe_dawn()
+    endif()
+
+    if(NOT DSSIM_BUILD_DAWN_SAMPLE)
         message(WARNING
             "Dawn sample requested but required headers/libs were not found. "
-            "Skipping dssim_gpu_dawn_checksum and continuing with dssim_gpu_dummy only. "
-            "Set DSSIM_DAWN_ROOT and DSSIM_DAWN_OUT_DIR to a valid Dawn build to enable it."
+            "Skipping dssim_gpu_dawn_checksum. "
+            "Set DSSIM_DAWN_ROOT and DSSIM_DAWN_OUT_DIR to a valid Dawn build, "
+            "or enable -DDSSIM_AUTO_INSTALL_DAWN=ON on Windows."
         )
     endif()
 endif()
