@@ -17,11 +17,11 @@ As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
 ```powershell
 cmake -S . -B build `
   -DDSSIM_DAWN_ROOT="<path-to-dawn-src>" `
-  -DDSSIM_DAWN_OUT_DIR="<path-to-dawn-out-release>"
+  -DDSSIM_DAWN_OUT_DIR="$(Resolve-Path .\third_party\dawn\out\Release)"
 
 cmake --build build --config Release --target dssim_gpu_dawn_checksum
 
-$env:PATH = "<path-to-dawn-out-release>;$env:PATH"
+$env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"
 
 .\build\src_gpu\Release\dssim_gpu_dawn_checksum.exe `
   .\tests\gray-profile.png .\tests\gray-profile2.png `
