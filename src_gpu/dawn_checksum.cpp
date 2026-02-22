@@ -24,7 +24,7 @@
 #include <dawn/webgpu_cpp.h>
 
 #include "png_loader.h"
-
+using namespace std::chrono;
 namespace {
 
 constexpr std::uint32_t kStage0QScale = 100000000u;
@@ -61,6 +61,7 @@ struct ScaleOutputs {
     double ssimScore = 0.0;
     // profiling
     std::chrono::milliseconds createShaderModule_time;
+    std::chrono::milliseconds createPSO_time;
 };
 
 struct MultiScaleOutputs {
@@ -98,6 +99,7 @@ struct DownsampleOutputs {
     std::vector<LinearRgba> pixels;
     // profiling
     std::chrono::milliseconds createShaderModule_time;
+    std::chrono::milliseconds createPSO_time;
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -765,7 +767,10 @@ ScaleOutputs RunStage0Compute(
     preprocessPipeDesc.layout = preprocessPl;
     preprocessPipeDesc.compute.module = preprocessShader;
     preprocessPipeDesc.compute.entryPoint = "main";
+    auto start_createPSO = std::chrono::high_resolution_clock::now();
     wgpu::ComputePipeline preprocessPipe = device.CreateComputePipeline(&preprocessPipeDesc);
+    auto finish_createPSO = std::chrono::high_resolution_clock::now();
+    outputs.createPSO_time = duration_cast<milliseconds>(finish_createPSO - start_createPSO);
     if (!preprocessPipe) {
         throw std::runtime_error("failed to create preprocess pipeline");
     }
@@ -842,7 +847,10 @@ ScaleOutputs RunStage0Compute(
     pipelineDesc.layout = pipelineLayout;
     pipelineDesc.compute.module = stage0Shader;
     pipelineDesc.compute.entryPoint = "main";
+    start_createPSO = std::chrono::high_resolution_clock::now();
     wgpu::ComputePipeline pipeline = device.CreateComputePipeline(&pipelineDesc);
+    finish_createPSO = std::chrono::high_resolution_clock::now();
+    outputs.createPSO_time += duration_cast<milliseconds>(finish_createPSO - start_createPSO);
     if (!pipeline) {
         throw std::runtime_error("failed to create stage0 compute pipeline");
     }
@@ -1083,7 +1091,10 @@ DownsampleOutputs RunDownsample2x2Compute(
     pipelineDesc.layout = pipelineLayout;
     pipelineDesc.compute.module = shader;
     pipelineDesc.compute.entryPoint = "main";
+    auto start_createPSO = std::chrono::high_resolution_clock::now();
     wgpu::ComputePipeline pipeline = device.CreateComputePipeline(&pipelineDesc);
+    auto finish_createPSO = std::chrono::high_resolution_clock::now();
+    out.createPSO_time = duration_cast<milliseconds>(finish_createPSO - start_createPSO);
 
     if (!bindGroupLayout || !pipelineLayout || !pipeline) {
         throw std::runtime_error("failed to create downsample pipeline");
@@ -1208,7 +1219,6 @@ wgpu::Device RequestDeviceBlocking(const wgpu::Instance& instance, const wgpu::A
 }  // namespace
 
 int main(int argc, char** argv) {
-    using std::chrono::milliseconds;
     try {
         const CliOptions options = ParseArgs(argc, argv);
         const auto stage0ShaderPath = ResolveShaderPath(argv[0], "stage0_absdiff.wgsl");
@@ -1275,6 +1285,7 @@ int main(int argc, char** argv) {
         DownsampleOutputs firstDownsample2;
 
         milliseconds createShaderModuleProcessingTime{0};
+        milliseconds createPSOProcessingTime{0};
         for (std::size_t level = 0; level < kDefaultScaleWeights.size(); ++level) {
             const bool readStats = options.debugDumpEnabled && level == 0;
             ScaleOutputs scale = RunStage0Compute(
@@ -1290,6 +1301,7 @@ int main(int argc, char** argv) {
                 stage0ShaderSource);
             compute.scales.push_back(std::move(scale));
             createShaderModuleProcessingTime += scale.createShaderModule_time;
+            createPSOProcessingTime += scale.createPSO_time;
             if (level + 1 >= kDefaultScaleWeights.size()) {
                 break;
             }
@@ -1312,6 +1324,7 @@ int main(int argc, char** argv) {
                 currHeight,
                 downsampleShaderSource);
             createShaderModuleProcessingTime += next1.createShaderModule_time + next2.createShaderModule_time;
+            createPSOProcessingTime += next1.createPSO_time + next2.createPSO_time;
             if (level == 0) {
                 firstDownsample1 = next1;
                 firstDownsample2 = next2;
@@ -1378,6 +1391,8 @@ int main(int argc, char** argv) {
         std::cout << "[profiling] decode_done_to_score_ms = " << elapsedMs << '\n';
         std::cout << "[profiling] CreateShaderModule processing time = "
                   << createShaderModuleProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] CreatePSO processing time = "
+        << createPSOProcessingTime.count() << "ms\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
