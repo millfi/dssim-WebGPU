@@ -96,6 +96,8 @@ struct DownsampleOutputs {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::vector<LinearRgba> pixels;
+    // profiling
+    std::chrono::milliseconds createShaderModule_time;
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -1046,7 +1048,11 @@ DownsampleOutputs RunDownsample2x2Compute(
     queue.WriteBuffer(inBuffer, 0, input.data(), inBytes);
     queue.WriteBuffer(paramsBuffer, 0, &paramsData, sizeof(ParamsData));
 
+    DownsampleOutputs out;
+    const auto start_CreateShaderModule = std::chrono::steady_clock::now();
     wgpu::ShaderModule shader = CreateShaderModule(device, shaderSource);
+    const auto finish_CreateShaderModule = std::chrono::steady_clock::now();
+    out.createShaderModule_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateShaderModule - start_CreateShaderModule);
     if (!shader) {
         throw std::runtime_error("failed to create downsample shader module");
     }
@@ -1118,7 +1124,6 @@ DownsampleOutputs RunDownsample2x2Compute(
     queue.Submit(1, &cb);
 
     const auto outBytesVec = ReadBufferBlocking(instance, readbackBuffer, outBytes);
-    DownsampleOutputs out;
     out.width = outWidth;
     out.height = outHeight;
     out.pixels.resize(outCount);
@@ -1268,7 +1273,8 @@ int main(int argc, char** argv) {
 
         DownsampleOutputs firstDownsample1;
         DownsampleOutputs firstDownsample2;
-        
+
+        milliseconds createShaderModuleProcessingTime{0};
         for (std::size_t level = 0; level < kDefaultScaleWeights.size(); ++level) {
             const bool readStats = options.debugDumpEnabled && level == 0;
             ScaleOutputs scale = RunStage0Compute(
@@ -1283,7 +1289,7 @@ int main(int argc, char** argv) {
                 labPreprocessShaderSource,
                 stage0ShaderSource);
             compute.scales.push_back(std::move(scale));
-
+            createShaderModuleProcessingTime += scale.createShaderModule_time;
             if (level + 1 >= kDefaultScaleWeights.size()) {
                 break;
             }
@@ -1305,6 +1311,7 @@ int main(int argc, char** argv) {
                 currWidth,
                 currHeight,
                 downsampleShaderSource);
+            createShaderModuleProcessingTime += next1.createShaderModule_time + next2.createShaderModule_time;
             if (level == 0) {
                 firstDownsample1 = next1;
                 firstDownsample2 = next2;
@@ -1369,13 +1376,6 @@ int main(int argc, char** argv) {
         const auto scoreReadyAt = std::chrono::steady_clock::now();
         const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(scoreReadyAt - decodeDoneAt).count();
         std::cout << "[profiling] decode_done_to_score_ms = " << elapsedMs << '\n';
-        const auto createShaderModuleProcessingTime = std::accumulate(
-            compute.scales.begin(),
-            compute.scales.end(),
-            std::chrono::milliseconds::zero(),
-            [](std::chrono::milliseconds acc, const ScaleOutputs& scale) {
-                return acc + scale.createShaderModule_time;
-            });
         std::cout << "[profiling] CreateShaderModule processing time = "
                   << createShaderModuleProcessingTime.count() << "ms\n";
         return 0;
