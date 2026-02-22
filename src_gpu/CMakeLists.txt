@@ -1,16 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
 
-add_executable(dssim_gpu_dummy
-    dummy_main.cpp
-)
-
-target_compile_features(dssim_gpu_dummy PRIVATE cxx_std_20)
-
-if(MSVC)
-    target_compile_options(dssim_gpu_dummy PRIVATE /W4 /EHsc)
-else()
-    target_compile_options(dssim_gpu_dummy PRIVATE -Wall -Wextra -Wpedantic)
-endif()
 
 option(DSSIM_ENABLE_DAWN_SAMPLE "Build Dawn native compute sample target" OFF)
 set(DSSIM_DAWN_ROOT "${CMAKE_SOURCE_DIR}/third_party/dawn" CACHE PATH "Path to Dawn source root")

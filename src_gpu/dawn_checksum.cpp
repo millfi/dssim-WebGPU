@@ -17,6 +17,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <numeric>
 
 #include <dawn/dawn_proc.h>
 #include <dawn/native/DawnNative.h>
@@ -58,6 +59,8 @@ struct ScaleOutputs {
     std::uint64_t dssimQSum = 0;
     double meanDssim = 0.0;
     double ssimScore = 0.0;
+    // profiling
+    std::chrono::milliseconds createShaderModule_time;
 };
 
 struct MultiScaleOutputs {
@@ -717,8 +720,14 @@ ScaleOutputs RunStage0Compute(
     queue.WriteBuffer(input2Buffer, 0, input2.data(), rgbaBytes);
     queue.WriteBuffer(paramsBuffer, 0, &paramsData, sizeof(ParamsData));
 
+    ScaleOutputs outputs;
+
+    const auto start_CreateShaderModule = std::chrono::steady_clock::now();
     wgpu::ShaderModule preprocessShader = CreateShaderModule(device, preprocessShaderSource);
     wgpu::ShaderModule stage0Shader = CreateShaderModule(device, stage0ShaderSource);
+    const auto finish_CreateShaderModule = std::chrono::steady_clock::now();
+    outputs.createShaderModule_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateShaderModule - start_CreateShaderModule);
+
     if (!preprocessShader || !stage0Shader) {
         throw std::runtime_error("failed to create stage0/preprocess shader module");
     }
@@ -924,7 +933,7 @@ ScaleOutputs RunStage0Compute(
     wgpu::CommandBuffer commandBuffer = encoder.Finish();
     queue.Submit(1, &commandBuffer);
 
-    ScaleOutputs outputs;
+    
     outputs.width = width;
     outputs.height = height;
 
@@ -1194,6 +1203,7 @@ wgpu::Device RequestDeviceBlocking(const wgpu::Instance& instance, const wgpu::A
 }  // namespace
 
 int main(int argc, char** argv) {
+    using std::chrono::milliseconds;
     try {
         const CliOptions options = ParseArgs(argc, argv);
         const auto stage0ShaderPath = ResolveShaderPath(argv[0], "stage0_absdiff.wgsl");
@@ -1258,7 +1268,7 @@ int main(int argc, char** argv) {
 
         DownsampleOutputs firstDownsample1;
         DownsampleOutputs firstDownsample2;
-
+        
         for (std::size_t level = 0; level < kDefaultScaleWeights.size(); ++level) {
             const bool readStats = options.debugDumpEnabled && level == 0;
             ScaleOutputs scale = RunStage0Compute(
@@ -1358,7 +1368,16 @@ int main(int argc, char** argv) {
         std::cout << scoreText.str() << '\t' << options.image2.string() << '\n';
         const auto scoreReadyAt = std::chrono::steady_clock::now();
         const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(scoreReadyAt - decodeDoneAt).count();
-        std::cout << "[timing] decode_done_to_score_ms=" << elapsedMs << '\n';
+        std::cout << "[profiling] decode_done_to_score_ms = " << elapsedMs << '\n';
+        const auto createShaderModuleProcessingTime = std::accumulate(
+            compute.scales.begin(),
+            compute.scales.end(),
+            std::chrono::milliseconds::zero(),
+            [](std::chrono::milliseconds acc, const ScaleOutputs& scale) {
+                return acc + scale.createShaderModule_time;
+            });
+        std::cout << "[profiling] CreateShaderModule processing time = "
+                  << createShaderModuleProcessingTime.count() << "ms\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
