@@ -5,6 +5,7 @@ This repository also contains an experimental WebGPU implementation in `src_gpu/
 - Binary: `dssim_gpu_dawn_checksum`
 - Input format today: PNG only (decoded with `libpng`)
 - Runtime dependency inside GPU binary: no `dssim` CLI dependency
+- Language standard: C++20 (set by CMake defaults; no extra build flag required)
 - Current state: working end-to-end, but not bit-exact with the reference yet on every image pair
 
 As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
@@ -13,6 +14,8 @@ As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
 - WebGPU (`dssim_gpu_dawn_checksum`): `0.00044680`
 
 ### Build and run (PowerShell)
+
+No explicit C++ standard option is needed. `CMakeLists.txt` enforces C++20 globally.
 
 ```powershell
 cmake -S . -B build `

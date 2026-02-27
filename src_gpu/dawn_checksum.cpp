@@ -639,10 +639,10 @@ ScaleOutputs RunStage0Compute(
         std::uint32_t qscale;
     };
     const ParamsData paramsData = {
-        static_cast<std::uint32_t>(elemCount),
-        width,
-        height,
-        kStage0QScale,
+        .len = static_cast<std::uint32_t>(elemCount),
+        .width = width,
+        .height = height,
+        .qscale = kStage0QScale,
     };
 
     wgpu::BufferDescriptor rgbaStorageDesc = {};
@@ -1022,7 +1022,12 @@ DownsampleOutputs RunDownsample2x2Compute(
         std::uint32_t outWidth;
         std::uint32_t outHeight;
     };
-    const ParamsData paramsData = {inWidth, inHeight, outWidth, outHeight};
+    const ParamsData paramsData = {
+        .inWidth = inWidth,
+        .inHeight = inHeight,
+        .outWidth = outWidth,
+        .outHeight = outHeight,
+    };
 
     wgpu::BufferDescriptor inDesc = {};
     inDesc.size = static_cast<std::uint64_t>(inBytes);
@@ -1238,16 +1243,16 @@ int main(int argc, char** argv) {
         const auto decodeDoneAt = std::chrono::steady_clock::now();
 
         const DecodedInputInfo decoded1 = {
-            image1.width,
-            image1.height,
-            image1.channels,
-            image1.pixels.size(),
+            .width = image1.width,
+            .height = image1.height,
+            .channels = image1.channels,
+            .byteCount = image1.pixels.size(),
         };
         const DecodedInputInfo decoded2 = {
-            image2.width,
-            image2.height,
-            image2.channels,
-            image2.pixels.size(),
+            .width = image2.width,
+            .height = image2.height,
+            .channels = image2.channels,
+            .byteCount = image2.pixels.size(),
         };
 
         const auto input1 = ConvertRgba8ToLinearPlu(image1.pixels);
@@ -1399,3 +1404,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+
