@@ -62,6 +62,13 @@ struct ScaleOutputs {
     // profiling
     std::chrono::milliseconds createShaderModule_time;
     std::chrono::milliseconds createPSO_time;
+    std::chrono::milliseconds createBuffers_time;
+    std::chrono::milliseconds writeInputBuffers_time;
+    std::chrono::milliseconds createPipelineLayouts_time;
+    std::chrono::milliseconds createBindGroups_time;
+    std::chrono::milliseconds dispatchAndSubmit_time;
+    std::chrono::milliseconds readback_time;
+    std::chrono::milliseconds postProcess_time;
 };
 
 struct MultiScaleOutputs {
@@ -100,6 +107,13 @@ struct DownsampleOutputs {
     // profiling
     std::chrono::milliseconds createShaderModule_time;
     std::chrono::milliseconds createPSO_time;
+    std::chrono::milliseconds createBuffers_time;
+    std::chrono::milliseconds writeInputBuffers_time;
+    std::chrono::milliseconds createPipelineLayouts_time;
+    std::chrono::milliseconds createBindGroups_time;
+    std::chrono::milliseconds dispatchAndSubmit_time;
+    std::chrono::milliseconds readback_time;
+    std::chrono::milliseconds postProcess_time;
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -632,6 +646,8 @@ ScaleOutputs RunStage0Compute(
     const std::size_t u32Bytes = elemCount * sizeof(std::uint32_t);
     const std::size_t f32Bytes = elemCount * sizeof(float);
 
+    ScaleOutputs outputs;
+
     struct ParamsData {
         std::uint32_t len;
         std::uint32_t width;
@@ -644,6 +660,7 @@ ScaleOutputs RunStage0Compute(
         .height = height,
         .qscale = kStage0QScale,
     };
+    const auto start_CreateBuffers = std::chrono::steady_clock::now();
 
     wgpu::BufferDescriptor rgbaStorageDesc = {};
     rgbaStorageDesc.size = static_cast<std::uint64_t>(rgbaBytes);
@@ -718,13 +735,16 @@ ScaleOutputs RunStage0Compute(
     if (!paramsBuffer) {
         throw std::runtime_error("failed to create stage0 params buffer");
     }
+    const auto finish_CreateBuffers = std::chrono::steady_clock::now();
+    outputs.createBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateBuffers - start_CreateBuffers);
 
     wgpu::Queue queue = device.GetQueue();
+    const auto start_WriteInputBuffers = std::chrono::steady_clock::now();
     queue.WriteBuffer(input1Buffer, 0, input1.data(), rgbaBytes);
     queue.WriteBuffer(input2Buffer, 0, input2.data(), rgbaBytes);
     queue.WriteBuffer(paramsBuffer, 0, &paramsData, sizeof(ParamsData));
-
-    ScaleOutputs outputs;
+    const auto finish_WriteInputBuffers = std::chrono::steady_clock::now();
+    outputs.writeInputBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_WriteInputBuffers - start_WriteInputBuffers);
 
     const auto start_CreateShaderModule = std::chrono::steady_clock::now();
     wgpu::ShaderModule preprocessShader = CreateShaderModule(device, preprocessShaderSource);
@@ -735,6 +755,7 @@ ScaleOutputs RunStage0Compute(
     if (!preprocessShader || !stage0Shader) {
         throw std::runtime_error("failed to create stage0/preprocess shader module");
     }
+    const auto start_CreatePipelineLayouts = std::chrono::steady_clock::now();
 
     wgpu::BindGroupLayoutEntry preprocessLayoutEntries[3] = {};
     preprocessLayoutEntries[0].binding = 0;
@@ -774,6 +795,7 @@ ScaleOutputs RunStage0Compute(
     if (!preprocessPipe) {
         throw std::runtime_error("failed to create preprocess pipeline");
     }
+    const auto start_CreateBindGroups = std::chrono::steady_clock::now();
 
     wgpu::BindGroupEntry preprocessBg1Entries[3] = {};
     preprocessBg1Entries[0].binding = 0;
@@ -842,6 +864,8 @@ ScaleOutputs RunStage0Compute(
     if (!pipelineLayout) {
         throw std::runtime_error("failed to create stage0 pipeline layout");
     }
+    const auto finish_CreatePipelineLayouts = std::chrono::steady_clock::now();
+    outputs.createPipelineLayouts_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreatePipelineLayouts - start_CreatePipelineLayouts);
 
     wgpu::ComputePipelineDescriptor pipelineDesc = {};
     pipelineDesc.layout = pipelineLayout;
@@ -909,6 +933,9 @@ ScaleOutputs RunStage0Compute(
     if (!bindGroup) {
         throw std::runtime_error("failed to create stage0 bind group");
     }
+    const auto finish_CreateBindGroups = std::chrono::steady_clock::now();
+    outputs.createBindGroups_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateBindGroups - start_CreateBindGroups);
+    const auto start_DispatchAndSubmit = std::chrono::steady_clock::now();
 
     wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
     {
@@ -942,11 +969,13 @@ ScaleOutputs RunStage0Compute(
 
     wgpu::CommandBuffer commandBuffer = encoder.Finish();
     queue.Submit(1, &commandBuffer);
+    const auto finish_DispatchAndSubmit = std::chrono::steady_clock::now();
+    outputs.dispatchAndSubmit_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_DispatchAndSubmit - start_DispatchAndSubmit);
 
     
     outputs.width = width;
     outputs.height = height;
-
+    const auto start_Readback = std::chrono::steady_clock::now();
     const auto dssimBytes = ReadBufferBlocking(instance, readbackDssimQBuffer, u32Bytes);
     outputs.dssimQ.resize(elemCount);
     std::memcpy(outputs.dssimQ.data(), dssimBytes.data(), u32Bytes);
@@ -967,7 +996,10 @@ ScaleOutputs RunStage0Compute(
         std::memcpy(outputs.var2.data(), var2Bytes.data(), f32Bytes);
         std::memcpy(outputs.cov12.data(), cov12Bytes.data(), f32Bytes);
     }
+    const auto finish_Readback = std::chrono::steady_clock::now();
+    outputs.readback_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_Readback - start_Readback);
 
+    const auto start_PostProcess = std::chrono::steady_clock::now();
     std::uint64_t sum = 0;
     for (std::uint32_t v : outputs.dssimQ) {
         sum += static_cast<std::uint64_t>(v);
@@ -992,6 +1024,8 @@ ScaleOutputs RunStage0Compute(
         devSum += std::abs(avg - s);
     }
     outputs.ssimScore = 1.0 - (devSum / static_cast<double>(elemCount));
+    const auto finish_PostProcess = std::chrono::steady_clock::now();
+    outputs.postProcess_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_PostProcess - start_PostProcess);
     return outputs;
 }
 
@@ -1028,6 +1062,8 @@ DownsampleOutputs RunDownsample2x2Compute(
         .outWidth = outWidth,
         .outHeight = outHeight,
     };
+    DownsampleOutputs out;
+    const auto start_CreateBuffers = std::chrono::steady_clock::now();
 
     wgpu::BufferDescriptor inDesc = {};
     inDesc.size = static_cast<std::uint64_t>(inBytes);
@@ -1056,12 +1092,15 @@ DownsampleOutputs RunDownsample2x2Compute(
     if (!inBuffer || !outBuffer || !readbackBuffer || !paramsBuffer) {
         throw std::runtime_error("failed to create downsample buffers");
     }
+    const auto finish_CreateBuffers = std::chrono::steady_clock::now();
+    out.createBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateBuffers - start_CreateBuffers);
 
     wgpu::Queue queue = device.GetQueue();
+    const auto start_WriteInputBuffers = std::chrono::steady_clock::now();
     queue.WriteBuffer(inBuffer, 0, input.data(), inBytes);
     queue.WriteBuffer(paramsBuffer, 0, &paramsData, sizeof(ParamsData));
-
-    DownsampleOutputs out;
+    const auto finish_WriteInputBuffers = std::chrono::steady_clock::now();
+    out.writeInputBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_WriteInputBuffers - start_WriteInputBuffers);
     const auto start_CreateShaderModule = std::chrono::steady_clock::now();
     wgpu::ShaderModule shader = CreateShaderModule(device, shaderSource);
     const auto finish_CreateShaderModule = std::chrono::steady_clock::now();
@@ -1069,6 +1108,7 @@ DownsampleOutputs RunDownsample2x2Compute(
     if (!shader) {
         throw std::runtime_error("failed to create downsample shader module");
     }
+    const auto start_CreatePipelineLayouts = std::chrono::steady_clock::now();
 
     wgpu::BindGroupLayoutEntry layoutEntries[3] = {};
     layoutEntries[0].binding = 0;
@@ -1104,6 +1144,9 @@ DownsampleOutputs RunDownsample2x2Compute(
     if (!bindGroupLayout || !pipelineLayout || !pipeline) {
         throw std::runtime_error("failed to create downsample pipeline");
     }
+    const auto finish_CreatePipelineLayouts = std::chrono::steady_clock::now();
+    out.createPipelineLayouts_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreatePipelineLayouts - start_CreatePipelineLayouts);
+    const auto start_CreateBindGroups = std::chrono::steady_clock::now();
 
     wgpu::BindGroupEntry bgEntries[3] = {};
     bgEntries[0].binding = 0;
@@ -1124,6 +1167,9 @@ DownsampleOutputs RunDownsample2x2Compute(
     if (!bindGroup) {
         throw std::runtime_error("failed to create downsample bind group");
     }
+    const auto finish_CreateBindGroups = std::chrono::steady_clock::now();
+    out.createBindGroups_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateBindGroups - start_CreateBindGroups);
+    const auto start_DispatchAndSubmit = std::chrono::steady_clock::now();
 
     wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
     {
@@ -1138,12 +1184,17 @@ DownsampleOutputs RunDownsample2x2Compute(
     encoder.CopyBufferToBuffer(outBuffer, 0, readbackBuffer, 0, static_cast<std::uint64_t>(outBytes));
     wgpu::CommandBuffer cb = encoder.Finish();
     queue.Submit(1, &cb);
+    const auto finish_DispatchAndSubmit = std::chrono::steady_clock::now();
+    out.dispatchAndSubmit_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_DispatchAndSubmit - start_DispatchAndSubmit);
 
+    const auto start_Readback = std::chrono::steady_clock::now();
     const auto outBytesVec = ReadBufferBlocking(instance, readbackBuffer, outBytes);
     out.width = outWidth;
     out.height = outHeight;
     out.pixels.resize(outCount);
     std::memcpy(out.pixels.data(), outBytesVec.data(), outBytes);
+    const auto finish_Readback = std::chrono::steady_clock::now();
+    out.readback_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_Readback - start_Readback);
     return out;
 }
 
@@ -1291,6 +1342,13 @@ int main(int argc, char** argv) {
 
         milliseconds createShaderModuleProcessingTime{0};
         milliseconds createPSOProcessingTime{0};
+        milliseconds createBuffersProcessingTime{0};
+        milliseconds writeInputBuffersProcessingTime{0};
+        milliseconds createPipelineLayoutsProcessingTime{0};
+        milliseconds createBindGroupsProcessingTime{0};
+        milliseconds dispatchAndSubmitProcessingTime{0};
+        milliseconds readbackProcessingTime{0};
+        milliseconds postProcessProcessingTime{0};
         for (std::size_t level = 0; level < kDefaultScaleWeights.size(); ++level) {
             const bool readStats = options.debugDumpEnabled && level == 0;
             ScaleOutputs scale = RunStage0Compute(
@@ -1304,9 +1362,16 @@ int main(int argc, char** argv) {
                 readStats,
                 labPreprocessShaderSource,
                 stage0ShaderSource);
-            compute.scales.push_back(std::move(scale));
             createShaderModuleProcessingTime += scale.createShaderModule_time;
             createPSOProcessingTime += scale.createPSO_time;
+            createBuffersProcessingTime += scale.createBuffers_time;
+            writeInputBuffersProcessingTime += scale.writeInputBuffers_time;
+            createPipelineLayoutsProcessingTime += scale.createPipelineLayouts_time;
+            createBindGroupsProcessingTime += scale.createBindGroups_time;
+            dispatchAndSubmitProcessingTime += scale.dispatchAndSubmit_time;
+            readbackProcessingTime += scale.readback_time;
+            postProcessProcessingTime += scale.postProcess_time;
+            compute.scales.push_back(std::move(scale));
             if (level + 1 >= kDefaultScaleWeights.size()) {
                 break;
             }
@@ -1330,6 +1395,12 @@ int main(int argc, char** argv) {
                 downsampleShaderSource);
             createShaderModuleProcessingTime += next1.createShaderModule_time + next2.createShaderModule_time;
             createPSOProcessingTime += next1.createPSO_time + next2.createPSO_time;
+            createBuffersProcessingTime += next1.createBuffers_time + next2.createBuffers_time;
+            writeInputBuffersProcessingTime += next1.writeInputBuffers_time + next2.writeInputBuffers_time;
+            createPipelineLayoutsProcessingTime += next1.createPipelineLayouts_time + next2.createPipelineLayouts_time;
+            createBindGroupsProcessingTime += next1.createBindGroups_time + next2.createBindGroups_time;
+            dispatchAndSubmitProcessingTime += next1.dispatchAndSubmit_time + next2.dispatchAndSubmit_time;
+            readbackProcessingTime += next1.readback_time + next2.readback_time;
             if (level == 0) {
                 firstDownsample1 = next1;
                 firstDownsample2 = next2;
@@ -1398,6 +1469,20 @@ int main(int argc, char** argv) {
                   << createShaderModuleProcessingTime.count() << "ms\n";
         std::cout << "[profiling] CreatePSO processing time = "
         << createPSOProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] CreateBuffer processing time = "
+                  << createBuffersProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] WriteInputBuffer processing time = "
+                  << writeInputBuffersProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] CreatePipelineLayout processing time = "
+                  << createPipelineLayoutsProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] CreateBindGroup processing time = "
+                  << createBindGroupsProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] DispatchAndSubmit processing time = "
+                  << dispatchAndSubmitProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] Readback processing time = "
+                  << readbackProcessingTime.count() << "ms\n";
+        std::cout << "[profiling] PostProcess processing time = "
+                  << postProcessProcessingTime.count() << "ms\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
