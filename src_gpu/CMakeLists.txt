@@ -104,12 +104,21 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
             message(FATAL_ERROR "DSSIM_AUTO_INSTALL_DAWN=ON is currently supported on Windows only.")
         endif()
 
+        set(DSSIM_INSTALL_DAWN_SCRIPT "${CMAKE_SOURCE_DIR}/tools/install_dawn.ps1")
+        if(NOT EXISTS "${DSSIM_INSTALL_DAWN_SCRIPT}")
+            message(FATAL_ERROR
+                "Automatic Dawn setup script is missing: ${DSSIM_INSTALL_DAWN_SCRIPT}. "
+                "Restore that file, or disable auto-install with -DDSSIM_AUTO_INSTALL_DAWN=OFF "
+                "and set DSSIM_DAWN_ROOT/DSSIM_DAWN_OUT_DIR manually."
+            )
+        endif()
+
         find_program(DSSIM_PWSH NAMES pwsh powershell REQUIRED)
         message(STATUS "Dawn not found. Running automatic Dawn setup script.")
         execute_process(
             COMMAND
                 "${DSSIM_PWSH}" -NoProfile -ExecutionPolicy Bypass
-                -File "${CMAKE_SOURCE_DIR}/tools/install_dawn.ps1"
+                -File "${DSSIM_INSTALL_DAWN_SCRIPT}"
                 -DawnRoot "${DSSIM_DAWN_ROOT}"
                 -DawnOutDir "${DSSIM_DAWN_OUT_DIR}"
                 -DepotToolsDir "${CMAKE_SOURCE_DIR}/third_party/depot_tools"
