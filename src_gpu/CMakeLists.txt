@@ -136,6 +136,12 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
 endif()
 
 if(DSSIM_BUILD_DAWN_SAMPLE)
+    if(WIN32)
+        file(GLOB DSSIM_DAWN_RUNTIME_DLLS
+            "${DSSIM_DAWN_OUT_DIR}/*.dll"
+        )
+    endif()
+
     add_executable(dssim_gpu_dawn_checksum
         dawn_checksum.cpp
         png_loader.cpp
@@ -179,4 +185,38 @@ if(DSSIM_BUILD_DAWN_SAMPLE)
             "${DSSIM_GPU_LAB_PREPROCESS_SHADER}"
             "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/shaders/lab_preprocess.wgsl"
     )
+
+    if(WIN32 AND DSSIM_DAWN_RUNTIME_DLLS)
+        add_custom_command(TARGET dssim_gpu_dawn_checksum POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${DSSIM_DAWN_RUNTIME_DLLS}
+                "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>"
+            COMMAND_EXPAND_LISTS
+        )
+    endif()
+
+    if(BUILD_TESTING)
+        set(DSSIM_GPU_SMOKE_JSON "${CMAKE_CURRENT_BINARY_DIR}/dssim_gpu_smoke.json")
+
+        add_test(
+            NAME dssim_gpu_dawn_checksum_smoke
+            COMMAND
+                $<TARGET_FILE:dssim_gpu_dawn_checksum>
+                "${CMAKE_SOURCE_DIR}/tests/gray-profile.png"
+                "${CMAKE_SOURCE_DIR}/tests/gray-profile2.png"
+                --out "${DSSIM_GPU_SMOKE_JSON}"
+        )
+
+        add_test(
+            NAME dssim_gpu_dawn_checksum_verify_json
+            COMMAND
+                ${CMAKE_COMMAND}
+                -DJSON_PATH=${DSSIM_GPU_SMOKE_JSON}
+                -P "${CMAKE_SOURCE_DIR}/tests/verify_gpu_json.cmake"
+        )
+        set_tests_properties(
+            dssim_gpu_dawn_checksum_verify_json
+            PROPERTIES DEPENDS dssim_gpu_dawn_checksum_smoke
+        )
+    endif()
 endif()
