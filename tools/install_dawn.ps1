@@ -86,13 +86,18 @@ if (-not (Test-Path -LiteralPath $DepotToolsDir)) {
 
 $env:PATH = "$DepotToolsDir;$env:PATH"
 
-$fetchPath = Get-CommandPath "fetch"
 $gclientPath = Get-CommandPath "gclient"
 $gnPath = Get-CommandPath "gn"
 $ninjaPath = Get-CommandPath "ninja"
+$gclientConfigPath = Join-Path $thirdPartyDir ".gclient"
 
 if (-not (Test-Path -LiteralPath $DawnRoot)) {
-    Invoke-Native -FilePath $fetchPath -Arguments @("--nohooks", "dawn") -WorkingDirectory $thirdPartyDir
+    if (Test-Path -LiteralPath $gclientConfigPath) {
+        Invoke-Native -FilePath $gclientPath -Arguments @("sync") -WorkingDirectory $thirdPartyDir
+    } else {
+        $fetchPath = Get-CommandPath "fetch"
+        Invoke-Native -FilePath $fetchPath -Arguments @("--nohooks", "dawn") -WorkingDirectory $thirdPartyDir
+    }
 }
 
 if (-not (Test-Path -LiteralPath $DawnRoot)) {
