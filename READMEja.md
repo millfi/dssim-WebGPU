@@ -24,4 +24,4 @@ $env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"
   --out .\out\gpu.json `
   --debug-dump-dir .\out\debug
 ```
-`$env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"`は明らかに不要です。原因はdllのパスの問題です。
+`$env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"`は明らかに不要です。原因はbuild時のdllの出力パスの問題です。
