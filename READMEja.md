@@ -14,7 +14,7 @@ cmake -S . -B build `
 
 cmake --build build --config Release --target dssim_gpu_dawn_checksum
 ```
-はうまくいきません。これはcodex-5.2-mediumの作業により生成されましたが、dawnの依存関係がよくわからず、git cloneで自動依存インストール→buildが失敗します。
+はうまくいきません。これはcodex-5.2-mediumの作業により生成されましたが、dawnの依存関係がよくわからず、`git clone→CMake自動依存インストール→build`が失敗します。
 ## 実行コマンドが冗長すぎる
 ```
 $env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"
