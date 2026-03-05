@@ -37,6 +37,38 @@ If `--out` is omitted, the score is printed to stdout.
 If Dawn is not available (for example after deleting `third_party/dawn`), CMake tries to auto-install it by default.  
 You can explicitly disable the sample with `-DDSSIM_ENABLE_DAWN_SAMPLE=OFF`.
 
+### Profiling output
+
+The executable prints aggregated profiling metrics in milliseconds:
+
+- `decode_done_to_score_ms`
+- `CreateShaderModule processing time`
+- `CreatePSO processing time`
+- `CreateBuffer processing time`
+- `WriteInputBuffer processing time`
+- `CreatePipelineLayout processing time`
+- `CreateBindGroup processing time`
+- `DispatchAndSubmit processing time`
+- `Readback processing time`
+- `PostProcess processing time`
+
+Interpretation notes:
+
+- `DispatchAndSubmit` is CPU-side command encoding/submission overhead, not pure WGSL kernel execution time.
+- `Readback` includes waiting for GPU completion and map/readback overhead.
+
+When `--out <json>` is specified, the same aggregated values are written to the top-level `profiling` object:
+
+- `decode_done_to_score_ms`
+- `create_shader_module_ms`
+- `create_pso_ms`
+- `create_buffer_ms`
+- `write_input_buffer_ms`
+- `create_pipeline_layout_ms`
+- `create_bind_group_ms`
+- `dispatch_and_submit_ms`
+- `readback_ms`
+- `post_process_ms`
 ### Auto-install Dawn (Windows)
 
 By default, CMake fetches/builds Dawn automatically when it is missing:
@@ -55,3 +87,5 @@ To disable this behavior, pass `-DDSSIM_AUTO_INSTALL_DAWN=OFF`.
 - Images must have the same width/height.
 - `--debug-dump-dir` emits intermediate GPU buffers for mismatch analysis.
 - The default backend on Windows is D3D12.
+
+

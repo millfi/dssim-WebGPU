@@ -1,5 +1,4 @@
 ## dssimのWebGPU dawn nativeによる高速化の試み
-buildと実行コマンドは`README.md`を参照してください。
 - アプリ名: `dssim_gpu_dawn_checksum`
 - 入力: PNGのみ。`libpng`でデコードをしています。ベンチマークの際は、非圧縮PNGを用いてください。
 - C++20で実装
