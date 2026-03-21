@@ -122,11 +122,11 @@ struct ProfilingSummary {
     std::chrono::milliseconds createPSOTime{0};
     std::chrono::milliseconds createBuffersTime{0};
     std::chrono::milliseconds writeInputBuffersTime{0};
-    std::chrono::milliseconds createPipelineLayoutsTime{0};
     std::chrono::milliseconds createBindGroupsTime{0};
     std::chrono::milliseconds dispatchAndSubmitTime{0};
     std::chrono::milliseconds readbackTime{0};
     std::chrono::milliseconds postProcessTime{0};
+    std::chrono::milliseconds otherTime{0};
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -476,11 +476,11 @@ std::string BuildJson(
     os << "    \"create_pso_ms\": " << profiling.createPSOTime.count() << ",\n";
     os << "    \"create_buffer_ms\": " << profiling.createBuffersTime.count() << ",\n";
     os << "    \"write_input_buffer_ms\": " << profiling.writeInputBuffersTime.count() << ",\n";
-    os << "    \"create_pipeline_layout_ms\": " << profiling.createPipelineLayoutsTime.count() << ",\n";
     os << "    \"create_bind_group_ms\": " << profiling.createBindGroupsTime.count() << ",\n";
     os << "    \"dispatch_and_submit_ms\": " << profiling.dispatchAndSubmitTime.count() << ",\n";
     os << "    \"readback_ms\": " << profiling.readbackTime.count() << ",\n";
-    os << "    \"post_process_ms\": " << profiling.postProcessTime.count() << "\n";
+    os << "    \"post_process_ms\": " << profiling.postProcessTime.count() << ",\n";
+    os << "    \"other_ms\": " << profiling.otherTime.count() << "\n";
     os << "  }";
 
     if (debugInfo != nullptr) {
@@ -1483,17 +1483,28 @@ int main(int argc, char** argv) {
         std::ostringstream scoreText;
         scoreText << std::fixed << std::setprecision(8) << compute.score;
         const auto scoreReadyAt = std::chrono::steady_clock::now();
+        const auto decodeDoneToScoreMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(scoreReadyAt - decodeDoneAt).count();
+        const milliseconds measuredProcessingTime =
+            createShaderModuleProcessingTime +
+            createPSOProcessingTime +
+            createBuffersProcessingTime +
+            writeInputBuffersProcessingTime +
+            createBindGroupsProcessingTime +
+            dispatchAndSubmitProcessingTime +
+            readbackProcessingTime +
+            postProcessProcessingTime;
         const ProfilingSummary profiling = {
-            .decodeDoneToScoreMs = std::chrono::duration_cast<std::chrono::milliseconds>(scoreReadyAt - decodeDoneAt).count(),
+            .decodeDoneToScoreMs = decodeDoneToScoreMs,
             .createShaderModuleTime = createShaderModuleProcessingTime,
             .createPSOTime = createPSOProcessingTime,
             .createBuffersTime = createBuffersProcessingTime,
             .writeInputBuffersTime = writeInputBuffersProcessingTime,
-            .createPipelineLayoutsTime = createPipelineLayoutsProcessingTime,
             .createBindGroupsTime = createBindGroupsProcessingTime,
             .dispatchAndSubmitTime = dispatchAndSubmitProcessingTime,
             .readbackTime = readbackProcessingTime,
             .postProcessTime = postProcessProcessingTime,
+            .otherTime = milliseconds(decodeDoneToScoreMs) - measuredProcessingTime,
         };
 
         if (!options.out.empty()) {
@@ -1511,8 +1522,6 @@ int main(int argc, char** argv) {
                   << profiling.createBuffersTime.count() << "ms\n";
         std::cout << "[profiling] WriteInputBuffer processing time = "
                   << profiling.writeInputBuffersTime.count() << "ms\n";
-        std::cout << "[profiling] CreatePipelineLayout processing time = "
-                  << profiling.createPipelineLayoutsTime.count() << "ms\n";
         std::cout << "[profiling] CreateBindGroup processing time = "
                   << profiling.createBindGroupsTime.count() << "ms\n";
         std::cout << "[profiling] DispatchAndSubmit processing time = "
@@ -1521,6 +1530,8 @@ int main(int argc, char** argv) {
                   << profiling.readbackTime.count() << "ms\n";
         std::cout << "[profiling] PostProcess processing time = "
                   << profiling.postProcessTime.count() << "ms\n";
+        std::cout << "[profiling] Other processing time = "
+                  << profiling.otherTime.count() << "ms\n";
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
