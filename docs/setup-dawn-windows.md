@@ -57,7 +57,7 @@ cmake -S . -B build `
   -DDSSIM_DAWN_ROOT="$PWD/third_party/dawn" `
   -DDSSIM_DAWN_OUT_DIR="$PWD/third_party/dawn/out/Release"
 
-cmake --build build --config Release --target dssim_gpu_dawn_checksum
+cmake --build build --config Release --target dssim_webgpu
 ```
 
 ## 6) Run end-to-end scripts
@@ -88,6 +88,6 @@ python .\tools\compare.py .\out\ref.json .\out\gpu.json
 
 ## Notes
 
-- Current `dssim_gpu_dawn_checksum` is scaffolding: it creates Dawn adapter/device and writes placeholder score JSON.
+- Current `dssim-WebGPU` is scaffolding: it creates Dawn adapter/device and writes placeholder score JSON.
 - Replace placeholder path with deterministic WGSL compute + readback stages and compare against reference after each step.
 - Keep strict determinism for reductions and float handling to satisfy exact-match policy.

@@ -8,12 +8,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(DSSIM_ENABLE_DAWN_SAMPLE "Build Dawn native compute sample target" ON)
 option(DSSIM_AUTO_INSTALL_DAWN "Automatically fetch and build Dawn when missing (Windows only)" ON)
-set(DSSIM_DAWN_ROOT "${CMAKE_SOURCE_DIR}/dawn_sdk" CACHE PATH "Path to Dawn source root")
+set(DSSIM_DEFAULT_DAWN_ROOT "${CMAKE_SOURCE_DIR}/third_party/dawn")
+set(DSSIM_LEGACY_DAWN_ROOT "${CMAKE_SOURCE_DIR}/dawn_sdk")
+set(DSSIM_DAWN_ROOT "${DSSIM_DEFAULT_DAWN_ROOT}" CACHE PATH "Path to Dawn source root")
 set(DSSIM_DAWN_OUT_DIR "${DSSIM_DAWN_ROOT}/out/Release" CACHE PATH "Path to Dawn GN build output directory")
 set(DSSIM_BUILD_DAWN_SAMPLE OFF)
-if(NOT EXISTS "${DSSIM_DAWN_ROOT}" AND EXISTS "${CMAKE_SOURCE_DIR}/dawn_sdk")
-    message(STATUS "Dawn root ${DSSIM_DAWN_ROOT} not found. Falling back to ${CMAKE_SOURCE_DIR}/dawn_sdk.")
-    set(DSSIM_DAWN_ROOT "${CMAKE_SOURCE_DIR}/dawn_sdk" CACHE PATH "Path to Dawn source root" FORCE)
+if(DSSIM_DAWN_ROOT STREQUAL "${DSSIM_LEGACY_DAWN_ROOT}" AND NOT EXISTS "${DSSIM_DAWN_ROOT}/DEPS")
+    message(STATUS "Legacy Dawn root ${DSSIM_DAWN_ROOT} is not a full checkout. Switching to ${DSSIM_DEFAULT_DAWN_ROOT}.")
+    set(DSSIM_DAWN_ROOT "${DSSIM_DEFAULT_DAWN_ROOT}" CACHE PATH "Path to Dawn source root" FORCE)
+    set(DSSIM_DAWN_OUT_DIR "${DSSIM_DAWN_ROOT}/out/Release" CACHE PATH "Path to Dawn GN build output directory" FORCE)
+elseif(NOT EXISTS "${DSSIM_DAWN_ROOT}/DEPS" AND EXISTS "${DSSIM_LEGACY_DAWN_ROOT}/DEPS")
+    message(STATUS "Dawn root ${DSSIM_DAWN_ROOT} not found. Falling back to ${DSSIM_LEGACY_DAWN_ROOT}.")
+    set(DSSIM_DAWN_ROOT "${DSSIM_LEGACY_DAWN_ROOT}" CACHE PATH "Path to Dawn source root" FORCE)
     set(DSSIM_DAWN_OUT_DIR "${DSSIM_DAWN_ROOT}/out/Release" CACHE PATH "Path to Dawn GN build output directory" FORCE)
 endif()
 
@@ -122,7 +128,7 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
         if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tools/install_dawn.ps1")
             message(FATAL_ERROR
                 "Dawn setup script not found: ${CMAKE_SOURCE_DIR}/tools/install_dawn.ps1. "
-                "Provide Dawn manually (for example in ${CMAKE_SOURCE_DIR}/dawn_sdk) "
+                "Provide Dawn manually (for example in ${DSSIM_DEFAULT_DAWN_ROOT}) "
                 "or disable auto-install with -DDSSIM_AUTO_INSTALL_DAWN=OFF."
             )
         endif()
@@ -151,7 +157,7 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
     if(NOT DSSIM_BUILD_DAWN_SAMPLE)
         message(WARNING
             "Dawn sample requested but required headers/libs were not found. "
-            "Skipping dssim_gpu_dawn_checksum. "
+            "Skipping dssim_webgpu. "
             "Set DSSIM_DAWN_ROOT and DSSIM_DAWN_OUT_DIR to a valid Dawn build, "
             "or enable -DDSSIM_AUTO_INSTALL_DAWN=ON on Windows."
         )
@@ -159,26 +165,26 @@ if(DSSIM_ENABLE_DAWN_SAMPLE)
 endif()
 
 if(DSSIM_BUILD_DAWN_SAMPLE)
-    add_executable(dssim_gpu_dawn_checksum
-        src_gpu/dawn_checksum.cpp
+    add_executable(dssim_webgpu
+        src_gpu/dssim-WebGPU.cpp
         src_gpu/png_loader.cpp
     )
-    set_target_properties(dssim_gpu_dawn_checksum PROPERTIES
-        OUTPUT_NAME "dawn_checksum"
+    set_target_properties(dssim_webgpu PROPERTIES
+        OUTPUT_NAME "dssim-WebGPU"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/src_gpu/$<CONFIG>"
     )
     set(DSSIM_GPU_STAGE0_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/stage0_absdiff.wgsl")
     set(DSSIM_GPU_DOWNSAMPLE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/downsample_2x2.wgsl")
     set(DSSIM_GPU_LAB_PREPROCESS_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/lab_preprocess.wgsl")
 
-    target_compile_features(dssim_gpu_dawn_checksum PRIVATE cxx_std_20)
-    target_include_directories(dssim_gpu_dawn_checksum PRIVATE
+    target_compile_features(dssim_webgpu PRIVATE cxx_std_20)
+    target_include_directories(dssim_webgpu PRIVATE
         "${DSSIM_DAWN_INCLUDE_DIR}"
         "${DSSIM_DAWN_SRC_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu"
     )
 
-    target_link_libraries(dssim_gpu_dawn_checksum PRIVATE
+    target_link_libraries(dssim_webgpu PRIVATE
         "${DSSIM_DAWN_WEBGPU_DAWN_LIB}"
         "${DSSIM_DAWN_DAWN_PROC_LIB}"
         "${DSSIM_DAWN_DAWN_NATIVE_LIB}"
@@ -186,13 +192,13 @@ if(DSSIM_BUILD_DAWN_SAMPLE)
     )
 
     if(MSVC)
-        target_compile_options(dssim_gpu_dawn_checksum PRIVATE /W4 /EHsc)
+        target_compile_options(dssim_webgpu PRIVATE /W4 /EHsc)
     else()
-        target_compile_options(dssim_gpu_dawn_checksum PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(dssim_webgpu PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
     if(WIN32)
-        target_link_libraries(dssim_gpu_dawn_checksum PRIVATE dxguid)
+        target_link_libraries(dssim_webgpu PRIVATE dxguid)
     endif()
 
     if(WIN32)
@@ -207,26 +213,26 @@ if(DSSIM_BUILD_DAWN_SAMPLE)
         foreach(DSSIM_DAWN_RUNTIME_DLL IN LISTS DSSIM_DAWN_RUNTIME_DLLS)
             set(DSSIM_DAWN_RUNTIME_DLL_PATH "${DSSIM_DAWN_OUT_DIR}/${DSSIM_DAWN_RUNTIME_DLL}")
             if(EXISTS "${DSSIM_DAWN_RUNTIME_DLL_PATH}")
-                add_custom_command(TARGET dssim_gpu_dawn_checksum POST_BUILD
+                add_custom_command(TARGET dssim_webgpu POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${DSSIM_DAWN_RUNTIME_DLL_PATH}"
-                        "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/${DSSIM_DAWN_RUNTIME_DLL}"
+                        "$<TARGET_FILE_DIR:dssim_webgpu>/${DSSIM_DAWN_RUNTIME_DLL}"
                 )
             endif()
         endforeach()
     endif()
 
-    add_custom_command(TARGET dssim_gpu_dawn_checksum POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/shaders"
+    add_custom_command(TARGET dssim_webgpu POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:dssim_webgpu>/shaders"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_STAGE0_SHADER}"
-            "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/shaders/stage0_absdiff.wgsl"
+            "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/stage0_absdiff.wgsl"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_DOWNSAMPLE_SHADER}"
-            "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/shaders/downsample_2x2.wgsl"
+            "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/downsample_2x2.wgsl"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_LAB_PREPROCESS_SHADER}"
-            "$<TARGET_FILE_DIR:dssim_gpu_dawn_checksum>/shaders/lab_preprocess.wgsl"
+            "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/lab_preprocess.wgsl"
     )
 endif()
 

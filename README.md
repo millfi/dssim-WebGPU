@@ -2,7 +2,7 @@
 
 This repository also contains an experimental WebGPU implementation in `src_gpu/`.
 
-- Binary: `dssim_gpu_dawn_checksum`
+- Binary: `dssim-WebGPU`
 - Input format today: PNG only (decoded with `libpng`)
 - Runtime dependency inside GPU binary: no `dssim` CLI dependency
 - Language standard: C++20 (set by CMake defaults; no extra build flag required)
@@ -11,7 +11,7 @@ This repository also contains an experimental WebGPU implementation in `src_gpu/
 As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
 
 - Reference (`dssim` CLI): `0.00044658`
-- WebGPU (`dssim_gpu_dawn_checksum`): `0.00044680`
+- WebGPU (`dssim-WebGPU`): `0.00044680`
 
 ### Build and run (PowerShell)
 
@@ -22,11 +22,11 @@ cmake -S . -B build `
   -DDSSIM_DAWN_ROOT="<path-to-dawn-src>" `
   -DDSSIM_DAWN_OUT_DIR="$(Resolve-Path .\third_party\dawn\out\Release)"
 
-cmake --build build --config Release --target dssim_gpu_dawn_checksum
+cmake --build build --config Release --target dssim_webgpu
 
 $env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"
 
-.\build\src_gpu\Release\dssim_gpu_dawn_checksum.exe `
+.\build\src_gpu\Release\dssim-WebGPU.exe `
   .\tests\gray-profile.png .\tests\gray-profile2.png `
   --out .\out\gpu.json `
   --debug-dump-dir .\out\debug
@@ -75,7 +75,7 @@ By default, CMake fetches/builds Dawn automatically when it is missing:
 
 ```powershell
 cmake -S . -B build
-cmake --build build --config Release --target dssim_gpu_dawn_checksum
+cmake --build build --config Release --target dssim_webgpu
 ```
 
 This invokes `tools/install_dawn.ps1`, which installs `third_party/depot_tools`, fetches `third_party/dawn`, and builds `dawn_native`, `dawn_proc`, and `webgpu_dawn`.

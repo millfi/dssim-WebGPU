@@ -176,9 +176,9 @@ if (-not [string]::IsNullOrWhiteSpace($options.Exe)) {
     $exePath = Resolve-PathSafe $options.Exe
 } else {
     $candidates = @(
-        (Join-Path $repoRoot "build/src_gpu/Release/dssim_gpu_dawn_checksum.exe"),
-        (Join-Path $repoRoot "build/src_gpu/Debug/dssim_gpu_dawn_checksum.exe"),
-        (Join-Path $repoRoot "build/src_gpu/dssim_gpu_dawn_checksum.exe"),
+        (Join-Path $repoRoot "build/src_gpu/Release/dssim-WebGPU.exe"),
+        (Join-Path $repoRoot "build/src_gpu/Debug/dssim-WebGPU.exe"),
+        (Join-Path $repoRoot "build/src_gpu/dssim-WebGPU.exe"),
         (Join-Path $repoRoot "build/src_gpu/Release/dssim_gpu_dummy.exe"),
         (Join-Path $repoRoot "build/src_gpu/Debug/dssim_gpu_dummy.exe"),
         (Join-Path $repoRoot "build/src_gpu/dssim_gpu_dummy.exe"),
@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrWhiteSpace($options.Exe)) {
 
 if (-not [string]::IsNullOrWhiteSpace($exePath)) {
     $exeLeaf = [System.IO.Path]::GetFileName($exePath)
-    $supportsDebugArg = $exeLeaf -ieq "dssim_gpu_dawn_checksum.exe"
+    $supportsDebugArg = $exeLeaf -ieq "dssim-WebGPU.exe"
     $exeArgs = @($image1Path, $image2Path, "--out", $outPath)
     if ($supportsDebugArg -and -not [string]::IsNullOrWhiteSpace($options.DebugDumpDir)) {
         $exeArgs += @("--debug-dump-dir", ([System.IO.Path]::GetFullPath($options.DebugDumpDir)))

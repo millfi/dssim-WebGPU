@@ -222,7 +222,7 @@ std::filesystem::path ResolveShaderPath(
 CliOptions ParseArgs(int argc, char** argv) {
     if (argc < 3) {
         throw std::runtime_error(
-            "usage: dssim_gpu_dawn_checksum <img1> <img2> [--out <json>] "
+            "usage: dssim-WebGPU <img1> <img2> [--out <json>] "
             "[--debug-dump-dir <dir>]");
     }
 
@@ -397,7 +397,7 @@ std::string BuildJson(
     }
 
     std::ostringstream command;
-    command << "dssim_gpu_dawn_checksum \"" << abs1 << "\" \"" << abs2 << "\"";
+    command << "dssim-WebGPU \"" << abs1 << "\" \"" << abs2 << "\"";
     if (!absOut.empty()) {
         command << " --out \"" << absOut << "\"";
     }
@@ -1534,7 +1534,7 @@ int main(int argc, char** argv) {
                   << profiling.otherTime.count() << "ms\n";
         return 0;
     } catch (const std::exception& ex) {
-        std::cerr << "dssim_gpu_dawn_checksum error: " << ex.what() << '\n';
+        std::cerr << "dssim-WebGPU error: " << ex.what() << '\n';
         return 1;
     }
 }

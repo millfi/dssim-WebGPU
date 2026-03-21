@@ -71,9 +71,10 @@ function Get-CommandPath {
 $DawnRoot = Resolve-FullPath $DawnRoot
 $DawnOutDir = Resolve-FullPath $DawnOutDir
 $DepotToolsDir = Resolve-FullPath $DepotToolsDir
-$thirdPartyDir = Split-Path -Parent $DawnRoot
+$workspaceDir = Split-Path -Parent $DawnRoot
+$dawnDirName = Split-Path -Leaf $DawnRoot
 
-New-Item -ItemType Directory -Path $thirdPartyDir -Force | Out-Null
+New-Item -ItemType Directory -Path $workspaceDir -Force | Out-Null
 
 if (-not (Test-Path -LiteralPath $DepotToolsDir)) {
     $gitPath = Get-CommandPath "git"
@@ -81,39 +82,48 @@ if (-not (Test-Path -LiteralPath $DepotToolsDir)) {
         "clone",
         "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
         $DepotToolsDir
-    ) -WorkingDirectory $thirdPartyDir
+    ) -WorkingDirectory $workspaceDir
 }
 
 $env:PATH = "$DepotToolsDir;$env:PATH"
+if (-not $env:DEPOT_TOOLS_WIN_TOOLCHAIN) {
+    $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
+}
 
 $gclientPath = Get-CommandPath "gclient"
 $gnPath = Get-CommandPath "gn"
 $ninjaPath = Get-CommandPath "ninja"
-$gclientConfigPath = Join-Path $thirdPartyDir ".gclient"
+$gclientConfigPath = Join-Path $workspaceDir ".gclient"
+$dawnLooksLikeCheckout = (Test-Path -LiteralPath (Join-Path $DawnRoot "DEPS")) -or `
+    (Test-Path -LiteralPath (Join-Path $DawnRoot ".git"))
 
-if (-not (Test-Path -LiteralPath $DawnRoot)) {
-    if (Test-Path -LiteralPath $gclientConfigPath) {
-        Invoke-Native -FilePath $gclientPath -Arguments @("sync") -WorkingDirectory $thirdPartyDir
-    } else {
-        $fetchPath = Get-CommandPath "fetch"
-        Invoke-Native -FilePath $fetchPath -Arguments @("--nohooks", "dawn") -WorkingDirectory $thirdPartyDir
-    }
+if ((Test-Path -LiteralPath $DawnRoot) -and -not $dawnLooksLikeCheckout) {
+    throw "Dawn root exists but is not a full Dawn checkout: $DawnRoot"
 }
 
-if (-not (Test-Path -LiteralPath $DawnRoot)) {
-    throw "Dawn root was not created by fetch: $DawnRoot"
+if (-not (Test-Path -LiteralPath $gclientConfigPath)) {
+    Invoke-Native -FilePath $gclientPath -Arguments @(
+        "config",
+        "--name",
+        $dawnDirName,
+        "https://dawn.googlesource.com/dawn"
+    ) -WorkingDirectory $workspaceDir
 }
 
-Invoke-Native -FilePath $gclientPath -Arguments @("sync") -WorkingDirectory $DawnRoot
+Invoke-Native -FilePath $gclientPath -Arguments @("sync") -WorkingDirectory $workspaceDir
+
+if (-not (Test-Path -LiteralPath $DawnRoot)) {
+    throw "Dawn root was not created by gclient sync: $DawnRoot"
+}
 
 $gnArgs = "is_debug=false dcheck_always_on=false dawn_build_tests=false dawn_enable_opengl=false"
 Invoke-Native -FilePath $gnPath -Arguments @("gen", $DawnOutDir, "--args=$gnArgs") -WorkingDirectory $DawnRoot
 Invoke-Native -FilePath $ninjaPath -Arguments @(
     "-C",
     $DawnOutDir,
-    "dawn_native",
-    "dawn_proc",
-    "webgpu_dawn"
+    "dawn_native.dll",
+    "dawn_proc.dll",
+    "webgpu_dawn.dll"
 ) -WorkingDirectory $DawnRoot
 
 $requiredOutputs = @(
