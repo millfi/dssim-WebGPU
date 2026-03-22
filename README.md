@@ -10,21 +10,17 @@ This repository also contains an experimental WebGPU implementation in `src_gpu/
 
 As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
 
-- Reference (`dssim` CLI): `0.00044658`
-- WebGPU (`dssim-WebGPU`): `0.00044680`
+- Reference (dssim v3.4.0): `0.00044658`
+- WebGPU : `0.00044330`
 
 ### Build and run (PowerShell)
 
 No explicit C++ standard option is needed. `CMakeLists.txt` enforces C++20 globally.
 
 ```powershell
-cmake -S . -B build `
-  -DDSSIM_DAWN_ROOT="<path-to-dawn-src>" `
-  -DDSSIM_DAWN_OUT_DIR="$(Resolve-Path .\third_party\dawn\out\Release)"
+cmake -S . -B build
 
 cmake --build build --config Release --target dssim_webgpu
-
-$env:PATH = "$(Resolve-Path .\third_party\dawn\out\Release);$env:PATH"
 
 .\build\src_gpu\Release\dssim-WebGPU.exe `
   .\tests\gray-profile.png .\tests\gray-profile2.png `
