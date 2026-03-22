@@ -12,7 +12,9 @@ As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
 
 - Reference (dssim v3.4.0): `0.00044658`
 - WebGPU : `0.00044330`
-
+`.\tests\0.02s.png` vs `.\tests\0s.png`:
+- Reference (dssim v3.4.0): `0.00113154`
+- WebGPU : `0.00112473`
 ### Build and run (PowerShell)
 
 No explicit C++ standard option is needed. `CMakeLists.txt` enforces C++20 globally.
