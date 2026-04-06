@@ -1,0 +1,6 @@
+original.png,modified.png,reference_score(dssim v3.4.0),dssim-WebGPU
+gradation.png,gradation.png,0.00000000,0.00000214
+gradation.png,gradation-256.png,0.00414861,0.00374763
+gradation.png,gradation-fs8.png,0.00091652,0.00045432
+0s.png,0.02s.png,0.00113154,0.00112475
+1391p.png,1391p.jxl.png,0.00044658,0.00044330

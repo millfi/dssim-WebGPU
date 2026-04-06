@@ -26,36 +26,53 @@ cmake --build build --config Release --target dssim_webgpu
 
 .\build\src_gpu\Release\dssim-WebGPU.exe `
   .\tests\gray-profile.png .\tests\gray-profile2.png `
+  --profiling `
   --out .\out\gpu.json `
   --debug-dump-dir .\out\debug
 ```
 
 If `--out` is omitted, the score is printed to stdout.
 
+If `--profiling` is omitted, profiling is not printed to stdout.
+
+To reuse the same WebGPU device and pipelines across multiple comparisons in one process, use
+`--stdin-pairs` and provide one tab-delimited pair per line on stdin:
+
+```powershell
+$tab = [char]9
+@(
+  ".\tests\gradation.png${tab}.\tests\gradation-fs8.png"
+  ".\tests\gradation.png${tab}.\tests\gradation-256.png"
+) | .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling
+```
+
 If Dawn is not available (for example after deleting `third_party/dawn`), CMake tries to auto-install it by default.  
 You can explicitly disable the sample with `-DDSSIM_ENABLE_DAWN_SAMPLE=OFF`.
 
 ### Profiling output
 
-The executable prints aggregated profiling metrics in milliseconds:
+When `--profiling` is specified, the executable prints MECE profiling buckets in milliseconds:
 
-- `decode_done_to_score_ms`
-- `CreateShaderModule processing time`
-- `CreatePSO processing time`
-- `CreateBuffer processing time`
-- `WriteInputBuffer processing time`
-- `CreatePipelineLayout processing time`
-- `CreateBindGroup processing time`
-- `DispatchAndSubmit processing time`
-- `Readback processing time`
-- `PostProcess processing time`
+- `session_init_total_ms`
+- `session_init_pipeline_setup_ms`
+- `session_init_resource_prep_ms`
+- `session_init_gpu_execution_ms`
+- `session_init_cpu_postprocess_ms`
+- `session_init_other_ms`
+- `total_ms`
+- `pipeline_setup_ms`
+- `resource_prep_ms`
+- `gpu_execution_ms`
+- `cpu_postprocess_ms`
+- `other_ms`
 
 Interpretation notes:
 
-- `DispatchAndSubmit` is CPU-side command encoding/submission overhead, not pure WGSL kernel execution time.
-- `Readback` includes waiting for GPU completion and map/readback overhead.
+- `pipeline_setup_ms` is shader module creation, pipeline layout creation, and PSO creation.
+- `resource_prep_ms` is buffer creation, buffer upload, and bind group creation.
+- `gpu_execution_ms` is dispatch/submit plus readback/map wait.
 
-When `--out <json>` is specified, the same aggregated values are written to the top-level `profiling` object:
+When `--out <json>` is specified, the raw timing breakdown is written to the top-level `profiling` object:
 
 - `decode_done_to_score_ms`
 - `create_shader_module_ms`
