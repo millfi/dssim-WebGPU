@@ -123,6 +123,7 @@ Current priority order:
 
 ### Reference implementation
 
-For reproducible score-matching work, prefer keeping an upstream `dssim` checkout under `reference/`.
+For reproducible score-matching work, prefer keeping an upstream `dssim` checkout under `src_reference/`.
 If a locally built reference binary is available from that checkout, use it for validation in preference to a `dssim.exe` found on `PATH`.
 Using the `PATH` binary is acceptable only when it is known to match the checked out source/version.
+
