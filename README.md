@@ -104,3 +104,25 @@ To disable this behavior, pass `-DDSSIM_AUTO_INSTALL_DAWN=OFF`.
 - The default backend on Windows is D3D12.
 
 
+
+### Score-matching workflow
+
+For score-matching work, use `tests/test_list.csv` as the main regression list.
+The intended loop is:
+
+1. Build `dssim-WebGPU`.
+2. Run every image pair listed in `tests/test_list.csv`.
+3. Update the `dssim-WebGPU` column in `tests/test_list.csv` with the newly measured scores.
+4. Compare the updated GPU scores against `reference_score(dssim v3.4.0)` and focus on shrinking the gap.
+
+Current priority order:
+
+- identical-image comparisons must reach `0.00000000`
+- `gradation.png` vs `gradation-fs8.png` must stop showing a very large relative error
+- only after those are fixed should optimization work resume
+
+### Reference implementation
+
+For reproducible score-matching work, prefer keeping an upstream `dssim` checkout under `reference/`.
+If a locally built reference binary is available from that checkout, use it for validation in preference to a `dssim.exe` found on `PATH`.
+Using the `PATH` binary is acceptable only when it is known to match the checked out source/version.

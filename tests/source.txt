@@ -1,0 +1,4 @@
+694566fe0d808c6191da90e9_68e3ac4c5f5060a1a3679e0b_blog-image-26-v2.webp:
+https://www.invicti.com/blog/web-security/dast-vs-penetration-testing
+laptop.png:
+magick .\694566fe0d808c6191da90e9_68e3ac4c5f5060a1a3679e0b_blog-image-26-v2.webp -filter box -resize 50% -define png:compression-level=0 -define png:compression-filter=0 -define png:compression-strategy=0 .\laptop.png
