@@ -19,7 +19,7 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read> in1: Vec4Buf;
 @group(0) @binding(1) var<storage, read> in2: Vec4Buf;
-@group(0) @binding(2) var<storage, read_write> out_dssim_q: U32Buf;
+@group(0) @binding(2) var<storage, read_write> out_ssim: F32Buf;
 @group(0) @binding(3) var<storage, read_write> out_mu1: F32Buf;
 @group(0) @binding(4) var<storage, read_write> out_mu2: F32Buf;
 @group(0) @binding(5) var<storage, read_write> out_var1: F32Buf;
@@ -86,8 +86,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let mu1 = sum1;
     let mu2 = sum2;
-    let var1 = max(sumsq1 - mu1 * mu1, vec3<f32>(0.0, 0.0, 0.0));
-    let var2 = max(sumsq2 - mu2 * mu2, vec3<f32>(0.0, 0.0, 0.0));
+    let var1 = sumsq1 - mu1 * mu1;
+    let var2 = sumsq2 - mu2 * mu2;
     let cov12 = sum12 - mu1 * mu2;
 
     let mu1_sq = (mu1.x * mu1.x + mu1.y * mu1.y + mu1.z * mu1.z) / 3.0;
@@ -102,10 +102,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let numer = (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2);
     let denom = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2);
     let ssim = numer / denom;
-    let dssim = clamp(0.5 * (1.0 - ssim), 0.0, 1.0);
-    let dssim_q = u32(round(dssim * f32(params.qscale)));
 
-    out_dssim_q.values[i] = dssim_q;
+    out_ssim.values[i] = ssim;
     out_mu1.values[i] = mu1.x;
     out_mu2.values[i] = mu2.x;
     out_var1.values[i] = var1.x;

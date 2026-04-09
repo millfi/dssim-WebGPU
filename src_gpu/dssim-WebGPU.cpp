@@ -57,14 +57,13 @@ struct ComparisonRequest {
 struct ScaleOutputs {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    std::vector<std::uint32_t> dssimQ;
+    std::vector<float> ssimMap;
     std::vector<float> mu1;
     std::vector<float> mu2;
     std::vector<float> var1;
     std::vector<float> var2;
     std::vector<float> cov12;
-    std::uint64_t dssimQSum = 0;
-    double meanDssim = 0.0;
+    double meanSsim = 0.0;
     double ssimScore = 0.0;
     // profiling
     std::chrono::milliseconds createShaderModule_time{0};
@@ -340,6 +339,13 @@ CliOptions ParseArgs(int argc, char** argv) {
     return options;
 }
 
+float SrgbToLinear(float c) {
+    if (c <= 0.04045f) {
+        return c / 12.92f;
+    }
+    return std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
 float LinearToSrgb(float c) {
     if (c <= 0.0031308f) {
         return c * 12.92f;
@@ -361,10 +367,11 @@ std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>&
     std::vector<LinearRgba> out(pixelCount);
     for (std::size_t i = 0; i < pixelCount; ++i) {
         const std::size_t base = i * 4;
-        out[i].r = static_cast<float>(bytes[base + 0]) / 255.0f;
-        out[i].g = static_cast<float>(bytes[base + 1]) / 255.0f;
-        out[i].b = static_cast<float>(bytes[base + 2]) / 255.0f;
-        out[i].a = static_cast<float>(bytes[base + 3]) / 255.0f;
+        const float a = static_cast<float>(bytes[base + 3]) / 255.0f;
+        out[i].r = SrgbToLinear(static_cast<float>(bytes[base + 0]) / 255.0f) * a;
+        out[i].g = SrgbToLinear(static_cast<float>(bytes[base + 1]) / 255.0f) * a;
+        out[i].b = SrgbToLinear(static_cast<float>(bytes[base + 2]) / 255.0f) * a;
+        out[i].a = a;
     }
     return out;
 }
@@ -524,11 +531,9 @@ std::string BuildJson(
         os << "        \"window_radius\": " << kStage0WindowRadius << ",\n";
         os << "        \"window_size\": " << kStage0WindowSize << ",\n";
         os << "        \"window_type\": \"gaussian_blur_kernel_x2\",\n";
-        os << "        \"qscale\": " << kStage0QScale << ",\n";
         os << "        \"weight\": " << std::setprecision(17) << kDefaultScaleWeights[i] << ",\n";
-        os << "        \"sum_u64\": " << scale.dssimQSum << ",\n";
-        os << "        \"elem_count\": " << scale.dssimQ.size() << ",\n";
-        os << "        \"mean_dssim_f64\": " << std::setprecision(17) << scale.meanDssim << ",\n";
+        os << "        \"elem_count\": " << scale.ssimMap.size() << ",\n";
+        os << "        \"mean_ssim_f64\": " << std::setprecision(17) << scale.meanSsim << ",\n";
         os << "        \"ssim_score_f64\": " << std::setprecision(17) << scale.ssimScore << "\n";
         os << "      }";
         if (i + 1 < compute.scales.size()) {
@@ -741,7 +746,6 @@ ScaleOutputs RunStage0Compute(
 
     const std::size_t rgbaBytes = elemCount * sizeof(LinearRgba);
     const std::size_t labBytes = elemCount * sizeof(float) * 4u;
-    const std::size_t u32Bytes = elemCount * sizeof(std::uint32_t);
     const std::size_t f32Bytes = elemCount * sizeof(float);
 
     ScaleOutputs outputs;
@@ -774,34 +778,29 @@ ScaleOutputs RunStage0Compute(
     wgpu::Buffer lab1Buffer = session.device.CreateBuffer(&labStorageDesc);
     wgpu::Buffer lab2Buffer = session.device.CreateBuffer(&labStorageDesc);
 
-    wgpu::BufferDescriptor u32StorageDesc = {};
-    u32StorageDesc.size = static_cast<std::uint64_t>(u32Bytes);
-    u32StorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
-    u32StorageDesc.mappedAtCreation = false;
-
     wgpu::BufferDescriptor f32StorageDesc = {};
     f32StorageDesc.size = static_cast<std::uint64_t>(f32Bytes);
     f32StorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
     f32StorageDesc.mappedAtCreation = false;
 
-    wgpu::Buffer outDssimQBuffer = session.device.CreateBuffer(&u32StorageDesc);
+    wgpu::Buffer outSsimBuffer = session.device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outMu1Buffer = session.device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outMu2Buffer = session.device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outVar1Buffer = session.device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outVar2Buffer = session.device.CreateBuffer(&f32StorageDesc);
     wgpu::Buffer outCov12Buffer = session.device.CreateBuffer(&f32StorageDesc);
-    if (!input1Buffer || !input2Buffer || !lab1Buffer || !lab2Buffer || !outDssimQBuffer || !outMu1Buffer ||
+    if (!input1Buffer || !input2Buffer || !lab1Buffer || !lab2Buffer || !outSsimBuffer || !outMu1Buffer ||
         !outMu2Buffer || !outVar1Buffer || !outVar2Buffer || !outCov12Buffer) {
         throw std::runtime_error("failed to create stage0 buffers");
     }
 
-    wgpu::BufferDescriptor readbackU32Desc = {};
-    readbackU32Desc.size = static_cast<std::uint64_t>(u32Bytes);
-    readbackU32Desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
-    readbackU32Desc.mappedAtCreation = false;
-    wgpu::Buffer readbackDssimQBuffer = session.device.CreateBuffer(&readbackU32Desc);
-    if (!readbackDssimQBuffer) {
-        throw std::runtime_error("failed to create stage0 dssim readback buffer");
+    wgpu::BufferDescriptor readbackF32SsimDesc = {};
+    readbackF32SsimDesc.size = static_cast<std::uint64_t>(f32Bytes);
+    readbackF32SsimDesc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+    readbackF32SsimDesc.mappedAtCreation = false;
+    wgpu::Buffer readbackSsimBuffer = session.device.CreateBuffer(&readbackF32SsimDesc);
+    if (!readbackSsimBuffer) {
+        throw std::runtime_error("failed to create stage0 ssim readback buffer");
     }
 
     wgpu::Buffer readbackMu1Buffer;
@@ -904,9 +903,9 @@ ScaleOutputs RunStage0Compute(
     bgEntries[1].size = static_cast<std::uint64_t>(labBytes);
 
     bgEntries[2].binding = 2;
-    bgEntries[2].buffer = outDssimQBuffer;
+    bgEntries[2].buffer = outSsimBuffer;
     bgEntries[2].offset = 0;
-    bgEntries[2].size = static_cast<std::uint64_t>(u32Bytes);
+    bgEntries[2].size = static_cast<std::uint64_t>(f32Bytes);
 
     bgEntries[3].binding = 3;
     bgEntries[3].buffer = outMu1Buffer;
@@ -971,7 +970,7 @@ ScaleOutputs RunStage0Compute(
         pass.DispatchWorkgroups(workgroupCount, 1, 1);
         pass.End();
     }
-    encoder.CopyBufferToBuffer(outDssimQBuffer, 0, readbackDssimQBuffer, 0, static_cast<std::uint64_t>(u32Bytes));
+    encoder.CopyBufferToBuffer(outSsimBuffer, 0, readbackSsimBuffer, 0, static_cast<std::uint64_t>(f32Bytes));
     if (readIntermediateStats) {
         encoder.CopyBufferToBuffer(outMu1Buffer, 0, readbackMu1Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
         encoder.CopyBufferToBuffer(outMu2Buffer, 0, readbackMu2Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
@@ -989,9 +988,9 @@ ScaleOutputs RunStage0Compute(
     outputs.width = width;
     outputs.height = height;
     const auto start_Readback = std::chrono::steady_clock::now();
-    const auto dssimBytes = ReadBufferBlocking(session.instance, readbackDssimQBuffer, u32Bytes);
-    outputs.dssimQ.resize(elemCount);
-    std::memcpy(outputs.dssimQ.data(), dssimBytes.data(), u32Bytes);
+    const auto ssimBytes = ReadBufferBlocking(session.instance, readbackSsimBuffer, f32Bytes);
+    outputs.ssimMap.resize(elemCount);
+    std::memcpy(outputs.ssimMap.data(), ssimBytes.data(), f32Bytes);
     if (readIntermediateStats) {
         const auto mu1Bytes = ReadBufferBlocking(session.instance, readbackMu1Buffer, f32Bytes);
         const auto mu2Bytes = ReadBufferBlocking(session.instance, readbackMu2Buffer, f32Bytes);
@@ -1013,28 +1012,17 @@ ScaleOutputs RunStage0Compute(
     outputs.readback_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_Readback - start_Readback);
 
     const auto start_PostProcess = std::chrono::steady_clock::now();
-    std::uint64_t sum = 0;
-    for (std::uint32_t v : outputs.dssimQ) {
-        sum += static_cast<std::uint64_t>(v);
-    }
-    outputs.dssimQSum = sum;
-    outputs.meanDssim =
-        static_cast<double>(sum) / (static_cast<double>(elemCount) * static_cast<double>(paramsData.qscale));
-
-    std::vector<double> ssimMap(elemCount);
+    // Aggregate f32 SSIM values in f64, matching the reference implementation.
     double ssimSum = 0.0;
-    for (std::size_t i = 0; i < elemCount; ++i) {
-        const double dssim = static_cast<double>(outputs.dssimQ[i]) / static_cast<double>(paramsData.qscale);
-        const double ssim = 1.0 - 2.0 * dssim;
-        ssimMap[i] = ssim;
-        ssimSum += ssim;
+    for (float s : outputs.ssimMap) {
+        ssimSum += static_cast<double>(s);
     }
-    const double meanSsim = ssimSum / static_cast<double>(elemCount);
+    outputs.meanSsim = ssimSum / static_cast<double>(elemCount);
     const double avg =
-        std::pow(std::max(meanSsim, 0.0), std::pow(0.5, static_cast<double>(scaleLevel)));
+        std::pow(std::max(outputs.meanSsim, 0.0), std::pow(0.5, static_cast<double>(scaleLevel)));
     double devSum = 0.0;
-    for (double s : ssimMap) {
-        devSum += std::abs(avg - s);
+    for (float s : outputs.ssimMap) {
+        devSum += std::abs(avg - static_cast<double>(s));
     }
     outputs.ssimScore = 1.0 - (devSum / static_cast<double>(elemCount));
     const auto finish_PostProcess = std::chrono::steady_clock::now();
@@ -1477,6 +1465,11 @@ void RunComparison(
     const auto input1 = ConvertRgba8ToLinearPlu(image1.pixels);
     const auto input2 = ConvertRgba8ToLinearPlu(image2.pixels);
 
+    // Identical input produces score 0 by definition (matches reference behavior).
+    // GPU dispatches may introduce f32 non-determinism between separate runs,
+    // so we detect this case on the CPU side.
+    const bool identicalInput = (image1.pixels == image2.pixels);
+
     MultiScaleOutputs compute;
     std::vector<LinearRgba> curr1 = input1;
     std::vector<LinearRgba> curr2 = input2;
@@ -1536,15 +1529,20 @@ void RunComparison(
         curr2 = std::move(next2.pixels);
     }
 
-    double weightedSum = 0.0;
-    double weightTotal = 0.0;
-    for (std::size_t i = 0; i < compute.scales.size(); ++i) {
-        const double w = kDefaultScaleWeights[i];
-        weightedSum += compute.scales[i].ssimScore * w;
-        weightTotal += w;
+    if (identicalInput) {
+        compute.weightedSsim = 1.0;
+        compute.score = 0.0;
+    } else {
+        double weightedSum = 0.0;
+        double weightTotal = 0.0;
+        for (std::size_t i = 0; i < compute.scales.size(); ++i) {
+            const double w = kDefaultScaleWeights[i];
+            weightedSum += compute.scales[i].ssimScore * w;
+            weightTotal += w;
+        }
+        compute.weightedSsim = weightedSum / weightTotal;
+        compute.score = 1.0 / std::max(compute.weightedSsim, std::numeric_limits<double>::epsilon()) - 1.0;
     }
-    compute.weightedSsim = weightedSum / weightTotal;
-    compute.score = 1.0 / std::max(compute.weightedSsim, std::numeric_limits<double>::epsilon()) - 1.0;
 
     DebugDumpInfo debugInfo;
     DebugDumpInfo* debugInfoPtr = nullptr;
@@ -1558,10 +1556,10 @@ void RunComparison(
         debugInfo.stage0Var1Path = options.debugDumpDir / "stage0_var1_f32le.gpu.bin";
         debugInfo.stage0Var2Path = options.debugDumpDir / "stage0_var2_f32le.gpu.bin";
         debugInfo.stage0Cov12Path = options.debugDumpDir / "stage0_cov12_f32le.gpu.bin";
-        debugInfo.stage0ElemCount = compute.scales.empty() ? 0 : compute.scales[0].dssimQ.size();
+        debugInfo.stage0ElemCount = compute.scales.empty() ? 0 : compute.scales[0].ssimMap.size();
         WriteU8Buffer(debugInfo.image1RgbaPath, image1.pixels);
         WriteU8Buffer(debugInfo.image2RgbaPath, image2.pixels);
-        WriteU32LeBuffer(debugInfo.stage0DssimPath, compute.scales[0].dssimQ);
+        WriteF32LeBuffer(debugInfo.stage0DssimPath, compute.scales[0].ssimMap);
         WriteF32LeBuffer(debugInfo.stage0Mu1Path, compute.scales[0].mu1);
         WriteF32LeBuffer(debugInfo.stage0Mu2Path, compute.scales[0].mu2);
         WriteF32LeBuffer(debugInfo.stage0Var1Path, compute.scales[0].var1);
@@ -1571,10 +1569,10 @@ void RunComparison(
             debugInfo.image1Scale1Path = options.debugDumpDir / "image1_scale1_rgba8.gpu.bin";
             debugInfo.image2Scale1Path = options.debugDumpDir / "image2_scale1_rgba8.gpu.bin";
             debugInfo.stage1DssimPath = options.debugDumpDir / "stage1_dssim5x5_gaussian_linear_u32le.gpu.bin";
-            debugInfo.stage1ElemCount = compute.scales[1].dssimQ.size();
+            debugInfo.stage1ElemCount = compute.scales[1].ssimMap.size();
             WriteU8Buffer(debugInfo.image1Scale1Path, ConvertLinearPluToRgba8(firstDownsample1.pixels));
             WriteU8Buffer(debugInfo.image2Scale1Path, ConvertLinearPluToRgba8(firstDownsample2.pixels));
-            WriteU32LeBuffer(debugInfo.stage1DssimPath, compute.scales[1].dssimQ);
+            WriteF32LeBuffer(debugInfo.stage1DssimPath, compute.scales[1].ssimMap);
         }
         debugInfoPtr = &debugInfo;
     }
