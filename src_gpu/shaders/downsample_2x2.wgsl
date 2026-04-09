@@ -13,16 +13,15 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> out_pixels: Vec4Buf;
 @group(0) @binding(2) var<uniform> params: Params;
 
-@compute @workgroup_size(64, 1, 1)
+@compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    let out_len = params.out_width * params.out_height;
-    if (i >= out_len) {
+    if (gid.x >= params.out_width || gid.y >= params.out_height) {
         return;
     }
+    let i = gid.y * params.out_width + gid.x;
 
-    let ox = i % params.out_width;
-    let oy = i / params.out_width;
+    let ox = gid.x;
+    let oy = gid.y;
     let sx0 = i32(ox * 2u);
     let sy0 = i32(oy * 2u);
     let max_x = i32(params.in_width) - 1;

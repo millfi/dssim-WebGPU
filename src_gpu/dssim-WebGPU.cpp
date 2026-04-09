@@ -949,16 +949,18 @@ ScaleOutputs RunStage0Compute(
     outputs.createBindGroups_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateBindGroups - start_CreateBindGroups);
     const auto start_DispatchAndSubmit = std::chrono::steady_clock::now();
 
+    const std::uint32_t wgX = (width + 15u) / 16u;
+    const std::uint32_t wgY = (height + 15u) / 16u;
+
     wgpu::CommandEncoder encoder = session.device.CreateCommandEncoder();
     {
         wgpu::ComputePassDescriptor passDesc = {};
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.preprocessPipeline);
         pass.SetBindGroup(0, preprocessBg1);
-        const std::uint32_t workgroupCount = static_cast<std::uint32_t>((elemCount + 63) / 64);
-        pass.DispatchWorkgroups(workgroupCount, 1, 1);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
         pass.SetBindGroup(0, preprocessBg2);
-        pass.DispatchWorkgroups(workgroupCount, 1, 1);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
         pass.End();
     }
     {
@@ -966,8 +968,7 @@ ScaleOutputs RunStage0Compute(
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.stage0Pipeline);
         pass.SetBindGroup(0, bindGroup);
-        const std::uint32_t workgroupCount = static_cast<std::uint32_t>((elemCount + 63) / 64);
-        pass.DispatchWorkgroups(workgroupCount, 1, 1);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
         pass.End();
     }
     encoder.CopyBufferToBuffer(outSsimBuffer, 0, readbackSsimBuffer, 0, static_cast<std::uint64_t>(f32Bytes));
@@ -1137,8 +1138,9 @@ DownsampleOutputs RunDownsample2x2Compute(
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.downsamplePipeline);
         pass.SetBindGroup(0, bindGroup);
-        const std::uint32_t workgroupCount = static_cast<std::uint32_t>((outCount + 63u) / 64u);
-        pass.DispatchWorkgroups(workgroupCount, 1, 1);
+        const std::uint32_t dsWgX = (outWidth + 15u) / 16u;
+        const std::uint32_t dsWgY = (outHeight + 15u) / 16u;
+        pass.DispatchWorkgroups(dsWgX, dsWgY, 1);
         pass.End();
     }
     encoder.CopyBufferToBuffer(outBuffer, 0, readbackBuffer, 0, static_cast<std::uint64_t>(outBytes));

@@ -83,15 +83,15 @@ fn gaussian_weight_5x5(dx: i32, dy: i32) -> f32 {
     return 0.009088;
 }
 
-@compute @workgroup_size(64, 1, 1)
+@compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= params.len) {
+    if (gid.x >= params.width || gid.y >= params.height) {
         return;
     }
+    let i = gid.y * params.width + gid.x;
 
-    let x = i32(i % params.width);
-    let y = i32(i / params.width);
+    let x = i32(gid.x);
+    let y = i32(gid.y);
     let max_x = i32(params.width) - 1;
     let max_y = i32(params.height) - 1;
     // Input is already linear premultiplied alpha (RGBAPLU) from CPU.
