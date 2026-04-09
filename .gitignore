@@ -1,6 +1,5 @@
 dssim
 target/
-agents.md
 build*/
 out/
 third_party/dawn/
