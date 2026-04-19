@@ -1,0 +1,61 @@
+pipeline_times  = { line } ;
+
+line            = statement_line
+                | comment_line
+                | blank_line
+                | eof_statement_line
+                | eof_comment_line ;
+
+statement_line  = [ ws ], statement, [ ws, comment ], newline ;
+comment_line    = [ ws ], comment, newline ;
+blank_line      = [ ws ], newline ;
+
+eof_statement_line
+                = [ ws ], statement, [ ws, comment ] ;
+eof_comment_line
+                = [ ws ], comment ;
+
+statement       = pipeline_stmt
+                | metadata_stmt ;
+
+pipeline_stmt   = segment, { [ ws ], "->", [ ws ], segment } ;
+
+metadata_stmt   = interval_ref, [ ws ], ":=", [ ws ],
+                  timer_name, [ ws ], "=", [ ws ],
+                  integer, [ ws ], unit ;
+
+segment         = span
+                | interval_ref ;
+
+span            = begin_ref, [ ws ], span_op, [ ws ], end_ref ;
+
+interval_ref    = begin_ref, [ ws ], "-", [ ws ], end_ref ;
+
+begin_ref       = "begin_", integer ;
+end_ref         = "end_", integer ;
+
+timer_name      = identifier ;
+
+unit            = "nanoseconds"
+                | "microseconds"
+                | "milliseconds"
+                | "seconds" ;
+
+span_op         = "<", "-", { "-" }, ">" ;
+
+identifier      = ident_start, { ident_continue } ;
+ident_start     = letter | "_" ;
+ident_continue  = letter | digit | "_" ;
+
+integer         = digit, { digit } ;
+
+comment         = "#", { non_newline_char } ;
+
+ws              = { " " | "\t" } ;
+newline         = "\n" | "\r\n" ;
+
+letter          = "A"…"Z" | "a"…"z" ;
+digit           = "0"…"9" ;
+
+non_newline_char
+                = ? 改行以外の任意の文字 ? ;
