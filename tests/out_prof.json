@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "engine": "gpu-dawn-wgsl-dssim-ms-stage5x5-gaussian-linear",
+  "status": "ok",
+  "input": {
+    "image1": "D:\\dssim-WebGPU\\tests\\gradation.png",
+    "image2": "D:\\dssim-WebGPU\\tests\\gradation-fs8.png"
+  },
+  "decoded_input": {
+    "image1": {
+      "width": 3200,
+      "height": 2400,
+      "channels": 4,
+      "bytes": 30720000
+    },
+    "image2": {
+      "width": 3200,
+      "height": 2400,
+      "channels": 4,
+      "bytes": 30720000
+    }
+  },
+  "command": "dssim-WebGPU \"D:\\dssim-WebGPU\\tests\\gradation.png\" \"D:\\dssim-WebGPU\\tests\\gradation-fs8.png\" --out \"D:\\dssim-WebGPU\\tests\\out_prof.json\"",
+  "version": "dawn-dssim-ms-stage5x5-gaussian-linear-1",
+  "result": {
+    "score_source": "gpu-reference-like-ms-ssim-provisional",
+    "score_text": "0.00091826",
+    "score_f64": 0.00091826364324565368,
+    "score_bits_u64": "0x3F4E16F4288E6800",
+    "compared_path": "D:\\dssim-WebGPU\\tests\\gradation-fs8.png",
+    "gpu_scales": [
+      {
+        "level": 0,
+        "width": 3200,
+        "height": 2400,
+        "metric": "dssim_5x5_gaussian_luma_linear_srgb",
+        "window_radius": 2,
+        "window_size": 5,
+        "window_type": "gaussian_blur_kernel_x2",
+        "weight": 0.028000000000000001,
+        "elem_count": 7680000,
+        "mean_ssim_f64": 0.97831934137036247,
+        "ssim_score_f64": 0.98339068922959538
+      },
+      {
+        "level": 1,
+        "width": 1600,
+        "height": 1200,
+        "metric": "dssim_5x5_gaussian_luma_linear_srgb",
+        "window_radius": 2,
+        "window_size": 5,
+        "window_type": "gaussian_blur_kernel_x2",
+        "weight": 0.19700000000000001,
+        "elem_count": 1920000,
+        "mean_ssim_f64": 0.99798203706719602,
+        "ssim_score_f64": 0.99866583557155708
+      },
+      {
+        "level": 2,
+        "width": 800,
+        "height": 600,
+        "metric": "dssim_5x5_gaussian_luma_linear_srgb",
+        "window_radius": 2,
+        "window_size": 5,
+        "window_type": "gaussian_blur_kernel_x2",
+        "weight": 0.32200000000000001,
+        "elem_count": 480000,
+        "mean_ssim_f64": 0.9995946536646535,
+        "ssim_score_f64": 0.99969054887956688
+      },
+      {
+        "level": 3,
+        "width": 400,
+        "height": 300,
+        "metric": "dssim_5x5_gaussian_luma_linear_srgb",
+        "window_radius": 2,
+        "window_size": 5,
+        "window_type": "gaussian_blur_kernel_x2",
+        "weight": 0.29799999999999999,
+        "elem_count": 120000,
+        "mean_ssim_f64": 0.99979608395000297,
+        "ssim_score_f64": 0.99981404493038262
+      },
+      {
+        "level": 4,
+        "width": 200,
+        "height": 150,
+        "metric": "dssim_5x5_gaussian_luma_linear_srgb",
+        "window_radius": 2,
+        "window_size": 5,
+        "window_type": "gaussian_blur_kernel_x2",
+        "weight": 0.155,
+        "elem_count": 30000,
+        "mean_ssim_f64": 0.99977331384221713,
+        "ssim_score_f64": 0.99977759843094138
+      }
+    ],
+    "aggregation": {
+      "method": "reference_like_weighted_ssim_to_dssim",
+      "used_scale_count": 5,
+      "weighted_ssim_f64": 0.99908257879129592
+    }
+  },
+  "adapter": "D3D12 driver version 32.0.21043.5001",
+  "profiling": {
+    "decode_done_to_score_ms": 2399,
+    "create_shader_module_ms": 0,
+    "create_pso_ms": 0,
+    "create_buffer_ms": 267,
+    "write_input_buffer_ms": 421,
+    "create_pipeline_layout_ms": 0,
+    "create_bind_group_ms": 0,
+    "dispatch_and_submit_ms": 4,
+    "readback_ms": 517,
+    "post_process_ms": 27,
+    "other_ms": 1163
+  }
+}
