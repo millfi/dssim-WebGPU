@@ -1525,8 +1525,8 @@ void RunComparison(
     const bool identicalInput = (image1.pixels == image2.pixels);
 
     MultiScaleOutputs compute;
-    std::vector<LinearRgba> curr1 = input1;
-    std::vector<LinearRgba> curr2 = input2;
+    std::vector<LinearRgba> curr1 = std::move(input1);
+    std::vector<LinearRgba> curr2 = std::move(input2);
     std::uint32_t currWidth = image1.width;
     std::uint32_t currHeight = image1.height;
 
