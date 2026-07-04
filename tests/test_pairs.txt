@@ -1,0 +1,10 @@
+.\tests\Endfield_UI.png	.\tests\\Endfield_UI.png.cjpegli-d3.jpg.png
+.\tests\Endfield_UI.png	.\tests\\Endfield_UI.png.cjpegli-d20.jpg.png
+.\tests\Endfield_UI.png	.\tests\\Endfield_UI.png.cjxlv0.11.2-d2.1.jxl.png
+.\tests\Endfield_UI.png	.\tests\\Endfield_UI.png.cjxlv0.11.2-d9.jxl.png
+.\tests\0s.png	.\tests\0.02s.png
+.\tests\1391p.png	.\tests\1391p.jxl.png
+.\tests\gradation.png	.\tests\gradation-256.png
+.\tests\gradation.png	.\tests\gradation-fs8.png
+.\tests\laptop.png	.\tests\laptop.d8.8.e7.jxl.png
+.\tests\laptop.png	.\tests\laptop.q24.jpegli.jpg.png

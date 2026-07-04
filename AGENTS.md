@@ -5,27 +5,31 @@
 - This repository must build as C++20 by default.
 - Do not require users to pass an extra C++ standard flag in build commands.
 - CMake sets this at the top level (`CMAKE_CXX_STANDARD=20`, `CMAKE_CXX_STANDARD_REQUIRED=ON`, `CMAKE_CXX_EXTENSIONS=OFF`).
+- Use PowerShell for every repository command. Do not provide Command Prompt, batch, Bash, or POSIX-shell commands.
+- Invoke executables and scripts with PowerShell's call operator (`&`) when appropriate.
 
 ## Verification workflow
 
 1. Configure with normal command:
-   - `cmake -S . -B build`
+   - `& cmake -S . -B build`
 2. Build target:
-   - `cmake --build build --config Release --target dssim_webgpu`
-3. Run executable:
-   - `build\src_gpu\Release\dssim-WebGPU.exe original.png modified.png`
+   - `& cmake --build build --config Release --target dssim_webgpu`
+3. Run the fixed multi-pair benchmark command:
+   - `Get-Content .\tests\test_pairs.txt | & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling`
+4. Mechanically compare scores with the original `dssim.exe` found on `PATH`:
+   - `& .\tools\check_regression.ps1`
 
 ## Current priority: Performance optimization
 
-- Score-matching is done. All test pairs in `tests/test_list.csv` are within 0.2% relative error of the reference.
+- Score-matching is done. All test pairs in `tests/test_pairs.txt` are within 0.2% relative error of the reference.
 - Current priority is **reducing end-to-end latency** while keeping scores within the regression tolerance.
 
 ### Regression tolerance
 
 - Same-image comparison must still produce `0.00000000`.
-- All other test pairs in `tests/test_list.csv`: **relative error < 1%** against the reference.
+- All other test pairs in `tests/test_pairs.txt`: **relative error < 1%** against the `dssim.exe` resolved from `PATH`.
 - After every optimization, re-run all pairs and confirm the tolerance holds before committing.
-- Do not edit the `reference_score(dssim v3.4.0)` column by hand.
+- Do not replace the mechanical `dssim.exe` comparison with hand-edited reference scores.
 
 ### Permitted precision trade-offs
 
@@ -39,8 +43,8 @@
 1. Identify the bottleneck using `--profiling` or `--out <json>` (see Profiling output section).
 2. Hypothesize an optimization.
 3. Implement the change.
-4. Build: `cmake --build build --config Release --target dssim_webgpu`
-5. Re-run all `tests/test_list.csv` pairs and confirm regression tolerance.
+4. Build: `& cmake --build build --config Release --target dssim_webgpu`
+5. Run `& .\tools\check_regression.ps1` and confirm every pair passes.
 6. Measure timing improvement with `--profiling`.
 7. If improved without regression: commit with a clear message describing the optimization and measured speedup.
 8. If regression: revert and try a different approach.
@@ -55,17 +59,20 @@
 
 ## Score-matching workflow (reference — complete)
 
-- Treat `tests/test_list.csv` as the regression list.
+- Treat `tests/test_pairs.txt` as the executable regression list.
 - For each validation pass:
   1. Build `dssim-WebGPU`.
-  2. Run the image pairs listed in `tests/test_list.csv`.
-  3. Update the `dssim-WebGPU` score column with the newly measured scores.
+  2. Run the fixed benchmark command.
+  3. Run `& .\tools\check_regression.ps1`.
+  4. Require every pair to pass before committing.
+- `tools/check_regression.ps1` resolves `dssim.exe` from `PATH`, runs both implementations, and exits nonzero on a tolerance violation.
+- Do not update reference scores by hand.
 - Use `--out <json>` for per-scale inspection and `--debug-dump-dir` for buffer-level investigation.
 
 ## Reference implementation
 
-- Prefer using `src_reference/target/release/dssim.exe` for validation over `dssim.exe` on PATH.
-- Falling back to the PATH binary is acceptable only when it is known to match the checked out source/version.
+- Use the original `dssim.exe` resolved from `PATH` for mechanical regression validation.
+- Confirm the resolved executable when needed with `(Get-Command dssim.exe -CommandType Application).Source`.
 - The reference source under `src_reference/` can be read to understand algorithmic details when needed.
 
 ## Profiling output
