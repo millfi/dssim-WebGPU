@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -365,12 +366,19 @@ std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>&
 
     const std::size_t pixelCount = bytes.size() / 4;
     std::vector<LinearRgba> out(pixelCount);
+    static const std::array<float, 256> srgbToLinearLut = [] {
+        std::array<float, 256> lut{};
+        for (std::size_t i = 0; i < lut.size(); ++i) {
+            lut[i] = SrgbToLinear(static_cast<float>(i) / 255.0f);
+        }
+        return lut;
+    }();
     for (std::size_t i = 0; i < pixelCount; ++i) {
         const std::size_t base = i * 4;
         const float a = static_cast<float>(bytes[base + 3]) / 255.0f;
-        out[i].r = SrgbToLinear(static_cast<float>(bytes[base + 0]) / 255.0f) * a;
-        out[i].g = SrgbToLinear(static_cast<float>(bytes[base + 1]) / 255.0f) * a;
-        out[i].b = SrgbToLinear(static_cast<float>(bytes[base + 2]) / 255.0f) * a;
+        out[i].r = srgbToLinearLut[bytes[base + 0]] * a;
+        out[i].g = srgbToLinearLut[bytes[base + 1]] * a;
+        out[i].b = srgbToLinearLut[bytes[base + 2]] * a;
         out[i].a = a;
     }
     return out;
@@ -784,11 +792,14 @@ ScaleOutputs RunStage0Compute(
     f32StorageDesc.mappedAtCreation = false;
 
     wgpu::Buffer outSsimBuffer = session.device.CreateBuffer(&f32StorageDesc);
-    wgpu::Buffer outMu1Buffer = session.device.CreateBuffer(&f32StorageDesc);
-    wgpu::Buffer outMu2Buffer = session.device.CreateBuffer(&f32StorageDesc);
-    wgpu::Buffer outVar1Buffer = session.device.CreateBuffer(&f32StorageDesc);
-    wgpu::Buffer outVar2Buffer = session.device.CreateBuffer(&f32StorageDesc);
-    wgpu::Buffer outCov12Buffer = session.device.CreateBuffer(&f32StorageDesc);
+    const std::size_t statsF32Bytes = readIntermediateStats ? f32Bytes : sizeof(float);
+    wgpu::BufferDescriptor statsStorageDesc = f32StorageDesc;
+    statsStorageDesc.size = static_cast<std::uint64_t>(statsF32Bytes);
+    wgpu::Buffer outMu1Buffer = session.device.CreateBuffer(&statsStorageDesc);
+    wgpu::Buffer outMu2Buffer = session.device.CreateBuffer(&statsStorageDesc);
+    wgpu::Buffer outVar1Buffer = session.device.CreateBuffer(&statsStorageDesc);
+    wgpu::Buffer outVar2Buffer = session.device.CreateBuffer(&statsStorageDesc);
+    wgpu::Buffer outCov12Buffer = session.device.CreateBuffer(&statsStorageDesc);
     if (!input1Buffer || !input2Buffer || !lab1Buffer || !lab2Buffer || !outSsimBuffer || !outMu1Buffer ||
         !outMu2Buffer || !outVar1Buffer || !outVar2Buffer || !outCov12Buffer) {
         throw std::runtime_error("failed to create stage0 buffers");
@@ -910,27 +921,27 @@ ScaleOutputs RunStage0Compute(
     bgEntries[3].binding = 3;
     bgEntries[3].buffer = outMu1Buffer;
     bgEntries[3].offset = 0;
-    bgEntries[3].size = static_cast<std::uint64_t>(f32Bytes);
+    bgEntries[3].size = static_cast<std::uint64_t>(statsF32Bytes);
 
     bgEntries[4].binding = 4;
     bgEntries[4].buffer = outMu2Buffer;
     bgEntries[4].offset = 0;
-    bgEntries[4].size = static_cast<std::uint64_t>(f32Bytes);
+    bgEntries[4].size = static_cast<std::uint64_t>(statsF32Bytes);
 
     bgEntries[5].binding = 5;
     bgEntries[5].buffer = outVar1Buffer;
     bgEntries[5].offset = 0;
-    bgEntries[5].size = static_cast<std::uint64_t>(f32Bytes);
+    bgEntries[5].size = static_cast<std::uint64_t>(statsF32Bytes);
 
     bgEntries[6].binding = 6;
     bgEntries[6].buffer = outVar2Buffer;
     bgEntries[6].offset = 0;
-    bgEntries[6].size = static_cast<std::uint64_t>(f32Bytes);
+    bgEntries[6].size = static_cast<std::uint64_t>(statsF32Bytes);
 
     bgEntries[7].binding = 7;
     bgEntries[7].buffer = outCov12Buffer;
     bgEntries[7].offset = 0;
-    bgEntries[7].size = static_cast<std::uint64_t>(f32Bytes);
+    bgEntries[7].size = static_cast<std::uint64_t>(statsF32Bytes);
 
     bgEntries[8].binding = 8;
     bgEntries[8].buffer = paramsBuffer;
@@ -1029,6 +1040,44 @@ ScaleOutputs RunStage0Compute(
     const auto finish_PostProcess = std::chrono::steady_clock::now();
     outputs.postProcess_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_PostProcess - start_PostProcess);
     return outputs;
+}
+
+DownsampleOutputs RunDownsample2x2Cpu(
+    const std::vector<LinearRgba>& input,
+    std::uint32_t inWidth,
+    std::uint32_t inHeight) {
+    const std::size_t inCount = static_cast<std::size_t>(inWidth) * static_cast<std::size_t>(inHeight);
+    if (input.size() != inCount) {
+        throw std::runtime_error("downsample input size mismatch");
+    }
+    const std::uint32_t outWidth = inWidth / 2u;
+    const std::uint32_t outHeight = inHeight / 2u;
+    if (outWidth == 0 || outHeight == 0) {
+        throw std::runtime_error("downsample output dimensions are zero");
+    }
+
+    DownsampleOutputs out;
+    out.width = outWidth;
+    out.height = outHeight;
+    out.pixels.resize(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight));
+
+    for (std::uint32_t oy = 0; oy < outHeight; ++oy) {
+        const std::size_t row0 = static_cast<std::size_t>(oy * 2u) * inWidth;
+        const std::size_t row1 = row0 + inWidth;
+        for (std::uint32_t ox = 0; ox < outWidth; ++ox) {
+            const std::size_t x = static_cast<std::size_t>(ox) * 2u;
+            const LinearRgba& p00 = input[row0 + x];
+            const LinearRgba& p01 = input[row0 + x + 1u];
+            const LinearRgba& p10 = input[row1 + x];
+            const LinearRgba& p11 = input[row1 + x + 1u];
+            LinearRgba& dst = out.pixels[static_cast<std::size_t>(oy) * outWidth + ox];
+            dst.r = ((p00.r + p01.r) + p10.r + p11.r) * 0.25f;
+            dst.g = ((p00.g + p01.g) + p10.g + p11.g) * 0.25f;
+            dst.b = ((p00.b + p01.b) + p10.b + p11.b) * 0.25f;
+            dst.a = ((p00.a + p01.a) + p10.a + p11.a) * 0.25f;
+        }
+    }
+    return out;
 }
 
 DownsampleOutputs RunDownsample2x2Compute(
@@ -1236,8 +1285,7 @@ wgpu::Device RequestDeviceBlocking(const wgpu::Instance& instance, const wgpu::A
 
 GpuSession CreateGpuSession(
     const std::string& labPreprocessShaderSource,
-    const std::string& stage0ShaderSource,
-    const std::string& downsampleShaderSource) {
+    const std::string& stage0ShaderSource) {
     GpuSession session;
 
     dawnProcSetProcs(&dawn::native::GetProcs());
@@ -1264,11 +1312,10 @@ GpuSession CreateGpuSession(
     const auto startCreateShaderModule = std::chrono::steady_clock::now();
     session.preprocessShader = CreateShaderModule(session.device, labPreprocessShaderSource);
     session.stage0Shader = CreateShaderModule(session.device, stage0ShaderSource);
-    session.downsampleShader = CreateShaderModule(session.device, downsampleShaderSource);
     const auto finishCreateShaderModule = std::chrono::steady_clock::now();
     session.initProfiling.createShaderModuleTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(finishCreateShaderModule - startCreateShaderModule);
-    if (!session.preprocessShader || !session.stage0Shader || !session.downsampleShader) {
+    if (!session.preprocessShader || !session.stage0Shader) {
         throw std::runtime_error("failed to create reusable shader modules");
     }
 
@@ -1278,13 +1325,6 @@ GpuSession CreateGpuSession(
         std::uint32_t height;
         std::uint32_t qscale;
     };
-    struct DownsampleParamsData {
-        std::uint32_t inWidth;
-        std::uint32_t inHeight;
-        std::uint32_t outWidth;
-        std::uint32_t outHeight;
-    };
-
     const auto startCreatePipelineLayouts = std::chrono::steady_clock::now();
 
     wgpu::BindGroupLayoutEntry preprocessLayoutEntries[3] = {};
@@ -1330,27 +1370,6 @@ GpuSession CreateGpuSession(
     stage0PlDesc.bindGroupLayouts = &session.stage0BindGroupLayout;
     session.stage0PipelineLayout = session.device.CreatePipelineLayout(&stage0PlDesc);
 
-    wgpu::BindGroupLayoutEntry downsampleLayoutEntries[3] = {};
-    downsampleLayoutEntries[0].binding = 0;
-    downsampleLayoutEntries[0].visibility = wgpu::ShaderStage::Compute;
-    downsampleLayoutEntries[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-    downsampleLayoutEntries[1].binding = 1;
-    downsampleLayoutEntries[1].visibility = wgpu::ShaderStage::Compute;
-    downsampleLayoutEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
-    downsampleLayoutEntries[2].binding = 2;
-    downsampleLayoutEntries[2].visibility = wgpu::ShaderStage::Compute;
-    downsampleLayoutEntries[2].buffer.type = wgpu::BufferBindingType::Uniform;
-    downsampleLayoutEntries[2].buffer.minBindingSize = sizeof(DownsampleParamsData);
-    wgpu::BindGroupLayoutDescriptor downsampleBglDesc = {};
-    downsampleBglDesc.entryCount = 3;
-    downsampleBglDesc.entries = downsampleLayoutEntries;
-    session.downsampleBindGroupLayout = session.device.CreateBindGroupLayout(&downsampleBglDesc);
-
-    wgpu::PipelineLayoutDescriptor downsamplePlDesc = {};
-    downsamplePlDesc.bindGroupLayoutCount = 1;
-    downsamplePlDesc.bindGroupLayouts = &session.downsampleBindGroupLayout;
-    session.downsamplePipelineLayout = session.device.CreatePipelineLayout(&downsamplePlDesc);
-
     const auto finishCreatePipelineLayouts = std::chrono::steady_clock::now();
     session.initProfiling.createPipelineLayoutsTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(finishCreatePipelineLayouts - startCreatePipelineLayouts);
@@ -1368,17 +1387,11 @@ GpuSession CreateGpuSession(
     stage0PipeDesc.compute.entryPoint = "main";
     session.stage0Pipeline = session.device.CreateComputePipeline(&stage0PipeDesc);
 
-    wgpu::ComputePipelineDescriptor downsamplePipeDesc = {};
-    downsamplePipeDesc.layout = session.downsamplePipelineLayout;
-    downsamplePipeDesc.compute.module = session.downsampleShader;
-    downsamplePipeDesc.compute.entryPoint = "main";
-    session.downsamplePipeline = session.device.CreateComputePipeline(&downsamplePipeDesc);
     const auto finishCreatePSO = std::chrono::high_resolution_clock::now();
     session.initProfiling.createPSOTime = duration_cast<milliseconds>(finishCreatePSO - startCreatePSO);
 
     if (!session.preprocessBindGroupLayout || !session.preprocessPipelineLayout || !session.preprocessPipeline ||
-        !session.stage0BindGroupLayout || !session.stage0PipelineLayout || !session.stage0Pipeline ||
-        !session.downsampleBindGroupLayout || !session.downsamplePipelineLayout || !session.downsamplePipeline) {
+        !session.stage0BindGroupLayout || !session.stage0PipelineLayout || !session.stage0Pipeline) {
         throw std::runtime_error("failed to create reusable compute pipelines");
     }
 
@@ -1464,8 +1477,11 @@ void RunComparison(
         .byteCount = image2.pixels.size(),
     };
 
-    const auto input1 = ConvertRgba8ToLinearPlu(image1.pixels);
-    const auto input2 = ConvertRgba8ToLinearPlu(image2.pixels);
+    auto input1Future = std::async(
+        std::launch::async,
+        [&image1] { return ConvertRgba8ToLinearPlu(image1.pixels); });
+    auto input2 = ConvertRgba8ToLinearPlu(image2.pixels);
+    auto input1 = input1Future.get();
 
     // Identical input produces score 0 by definition (matches reference behavior).
     // GPU dispatches may introduce f32 non-determinism between separate runs,
@@ -1511,8 +1527,20 @@ void RunComparison(
             break;
         }
 
-        DownsampleOutputs next1 = RunDownsample2x2Compute(session, curr1, currWidth, currHeight);
-        DownsampleOutputs next2 = RunDownsample2x2Compute(session, curr2, currWidth, currHeight);
+        DownsampleOutputs next1;
+        DownsampleOutputs next2;
+        if (curr1.size() >= 262144u) {
+            auto next1Future = std::async(
+                std::launch::async,
+                [&curr1, currWidth, currHeight] {
+                    return RunDownsample2x2Cpu(curr1, currWidth, currHeight);
+                });
+            next2 = RunDownsample2x2Cpu(curr2, currWidth, currHeight);
+            next1 = next1Future.get();
+        } else {
+            next1 = RunDownsample2x2Cpu(curr1, currWidth, currHeight);
+            next2 = RunDownsample2x2Cpu(curr2, currWidth, currHeight);
+        }
         createShaderModuleProcessingTime += next1.createShaderModule_time + next2.createShaderModule_time;
         createPSOProcessingTime += next1.createPSO_time + next2.createPSO_time;
         createBuffersProcessingTime += next1.createBuffers_time + next2.createBuffers_time;
@@ -1629,13 +1657,11 @@ int main(int argc, char** argv) {
     try {
         const CliOptions options = ParseArgs(argc, argv);
         const auto stage0ShaderPath = ResolveShaderPath(argv[0], "stage0_absdiff.wgsl");
-        const auto downsampleShaderPath = ResolveShaderPath(argv[0], "downsample_2x2.wgsl");
         const auto labPreprocessShaderPath = ResolveShaderPath(argv[0], "lab_preprocess.wgsl");
         const auto stage0ShaderSource = ReadAllText(stage0ShaderPath);
-        const auto downsampleShaderSource = ReadAllText(downsampleShaderPath);
         const auto labPreprocessShaderSource = ReadAllText(labPreprocessShaderPath);
         const GpuSession session =
-            CreateGpuSession(labPreprocessShaderSource, stage0ShaderSource, downsampleShaderSource);
+            CreateGpuSession(labPreprocessShaderSource, stage0ShaderSource);
         if (options.profilingEnabled) {
             PrintProfilingBuckets(
                 BuildSessionInitProfilingBuckets(session.initProfiling),
