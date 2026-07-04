@@ -359,6 +359,38 @@ std::uint8_t ToUnorm8(float value) {
     return static_cast<std::uint8_t>(std::lround(clamped * 255.0f));
 }
 
+template <typename Function>
+void ParallelFor(
+    std::size_t itemCount,
+    std::size_t minItemsPerWorker,
+    Function&& function) {
+    const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    const std::size_t maxWorkers = std::max<std::size_t>(1u, hardwareThreads / 2u);
+    const std::size_t usefulWorkers =
+        std::max<std::size_t>(1u, (itemCount + minItemsPerWorker - 1u) / minItemsPerWorker);
+    const std::size_t workerCount = std::min(maxWorkers, usefulWorkers);
+    if (workerCount <= 1u) {
+        function(0u, itemCount);
+        return;
+    }
+
+    const std::size_t itemsPerWorker = (itemCount + workerCount - 1u) / workerCount;
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount - 1u);
+    for (std::size_t worker = 1u; worker < workerCount; ++worker) {
+        const std::size_t begin = worker * itemsPerWorker;
+        const std::size_t end = std::min(itemCount, begin + itemsPerWorker);
+        if (begin < end) {
+            workers.emplace_back(function, begin, end);
+        }
+    }
+
+    function(0u, std::min(itemCount, itemsPerWorker));
+    for (auto& worker : workers) {
+        worker.join();
+    }
+}
+
 std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>& bytes) {
     if ((bytes.size() % 4) != 0) {
         throw std::runtime_error("rgba8 byte count is not divisible by 4");
@@ -373,14 +405,16 @@ std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>&
         }
         return lut;
     }();
-    for (std::size_t i = 0; i < pixelCount; ++i) {
-        const std::size_t base = i * 4;
-        const float a = static_cast<float>(bytes[base + 3]) / 255.0f;
-        out[i].r = srgbToLinearLut[bytes[base + 0]] * a;
-        out[i].g = srgbToLinearLut[bytes[base + 1]] * a;
-        out[i].b = srgbToLinearLut[bytes[base + 2]] * a;
-        out[i].a = a;
-    }
+    ParallelFor(pixelCount, 262144u, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            const std::size_t base = i * 4;
+            const float a = static_cast<float>(bytes[base + 3]) / 255.0f;
+            out[i].r = srgbToLinearLut[bytes[base + 0]] * a;
+            out[i].g = srgbToLinearLut[bytes[base + 1]] * a;
+            out[i].b = srgbToLinearLut[bytes[base + 2]] * a;
+            out[i].a = a;
+        }
+    });
     return out;
 }
 
@@ -1061,22 +1095,24 @@ DownsampleOutputs RunDownsample2x2Cpu(
     out.height = outHeight;
     out.pixels.resize(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight));
 
-    for (std::uint32_t oy = 0; oy < outHeight; ++oy) {
-        const std::size_t row0 = static_cast<std::size_t>(oy * 2u) * inWidth;
-        const std::size_t row1 = row0 + inWidth;
-        for (std::uint32_t ox = 0; ox < outWidth; ++ox) {
-            const std::size_t x = static_cast<std::size_t>(ox) * 2u;
-            const LinearRgba& p00 = input[row0 + x];
-            const LinearRgba& p01 = input[row0 + x + 1u];
-            const LinearRgba& p10 = input[row1 + x];
-            const LinearRgba& p11 = input[row1 + x + 1u];
-            LinearRgba& dst = out.pixels[static_cast<std::size_t>(oy) * outWidth + ox];
-            dst.r = ((p00.r + p01.r) + p10.r + p11.r) * 0.25f;
-            dst.g = ((p00.g + p01.g) + p10.g + p11.g) * 0.25f;
-            dst.b = ((p00.b + p01.b) + p10.b + p11.b) * 0.25f;
-            dst.a = ((p00.a + p01.a) + p10.a + p11.a) * 0.25f;
+    ParallelFor(outHeight, 128u, [&](std::size_t beginRow, std::size_t endRow) {
+        for (std::size_t oy = beginRow; oy < endRow; ++oy) {
+            const std::size_t row0 = (oy * 2u) * inWidth;
+            const std::size_t row1 = row0 + inWidth;
+            for (std::uint32_t ox = 0; ox < outWidth; ++ox) {
+                const std::size_t x = static_cast<std::size_t>(ox) * 2u;
+                const LinearRgba& p00 = input[row0 + x];
+                const LinearRgba& p01 = input[row0 + x + 1u];
+                const LinearRgba& p10 = input[row1 + x];
+                const LinearRgba& p11 = input[row1 + x + 1u];
+                LinearRgba& dst = out.pixels[oy * outWidth + ox];
+                dst.r = ((p00.r + p01.r) + p10.r + p11.r) * 0.25f;
+                dst.g = ((p00.g + p01.g) + p10.g + p11.g) * 0.25f;
+                dst.b = ((p00.b + p01.b) + p10.b + p11.b) * 0.25f;
+                dst.a = ((p00.a + p01.a) + p10.a + p11.a) * 0.25f;
+            }
         }
-    }
+    });
     return out;
 }
 
