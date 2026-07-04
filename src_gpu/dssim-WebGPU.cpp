@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -139,6 +140,30 @@ struct ProfilingSummary {
     std::chrono::milliseconds otherTime{0};
 };
 
+struct Stage0Resources {
+    std::size_t capacity = 0;
+    wgpu::Buffer input1Buffer;
+    wgpu::Buffer input2Buffer;
+    wgpu::Buffer lab1Buffer;
+    wgpu::Buffer lab2Buffer;
+    wgpu::Buffer outSsimBuffer;
+    wgpu::Buffer outMu1Buffer;
+    wgpu::Buffer outMu2Buffer;
+    wgpu::Buffer outVar1Buffer;
+    wgpu::Buffer outVar2Buffer;
+    wgpu::Buffer outCov12Buffer;
+    wgpu::Buffer readbackSsimBuffer;
+    wgpu::Buffer readbackMu1Buffer;
+    wgpu::Buffer readbackMu2Buffer;
+    wgpu::Buffer readbackVar1Buffer;
+    wgpu::Buffer readbackVar2Buffer;
+    wgpu::Buffer readbackCov12Buffer;
+    wgpu::Buffer paramsBuffer;
+    wgpu::BindGroup preprocessBindGroup1;
+    wgpu::BindGroup preprocessBindGroup2;
+    wgpu::BindGroup stage0BindGroup;
+};
+
 struct GpuSession {
     wgpu::Instance instance;
     wgpu::Adapter adapter;
@@ -160,6 +185,9 @@ struct GpuSession {
     wgpu::BindGroupLayout downsampleBindGroupLayout;
     wgpu::PipelineLayout downsamplePipelineLayout;
     wgpu::ComputePipeline downsamplePipeline;
+
+    std::unique_ptr<Stage0Resources> stage0Resources;
+    std::unique_ptr<Stage0Resources> debugStage0Resources;
 
     ProfilingSummary initProfiling;
 };
@@ -765,7 +793,7 @@ std::vector<std::uint8_t> ReadBufferBlocking(
 }
 
 ScaleOutputs RunStage0Compute(
-    const GpuSession& session,
+    GpuSession& session,
     const std::vector<LinearRgba>& input1,
     const std::vector<LinearRgba>& input2,
     std::uint32_t width,
@@ -789,7 +817,6 @@ ScaleOutputs RunStage0Compute(
     }
 
     const std::size_t rgbaBytes = elemCount * sizeof(LinearRgba);
-    const std::size_t labBytes = elemCount * sizeof(float) * 4u;
     const std::size_t f32Bytes = elemCount * sizeof(float);
 
     ScaleOutputs outputs;
@@ -806,194 +833,177 @@ ScaleOutputs RunStage0Compute(
         .height = height,
         .qscale = kStage0QScale,
     };
-    const auto start_CreateBuffers = std::chrono::steady_clock::now();
-
-    wgpu::BufferDescriptor rgbaStorageDesc = {};
-    rgbaStorageDesc.size = static_cast<std::uint64_t>(rgbaBytes);
-    rgbaStorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
-    rgbaStorageDesc.mappedAtCreation = false;
-
-    wgpu::Buffer input1Buffer = session.device.CreateBuffer(&rgbaStorageDesc);
-    wgpu::Buffer input2Buffer = session.device.CreateBuffer(&rgbaStorageDesc);
-    wgpu::BufferDescriptor labStorageDesc = {};
-    labStorageDesc.size = static_cast<std::uint64_t>(labBytes);
-    labStorageDesc.usage = wgpu::BufferUsage::Storage;
-    labStorageDesc.mappedAtCreation = false;
-    wgpu::Buffer lab1Buffer = session.device.CreateBuffer(&labStorageDesc);
-    wgpu::Buffer lab2Buffer = session.device.CreateBuffer(&labStorageDesc);
-
-    wgpu::BufferDescriptor f32StorageDesc = {};
-    f32StorageDesc.size = static_cast<std::uint64_t>(f32Bytes);
-    f32StorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
-    f32StorageDesc.mappedAtCreation = false;
-
-    wgpu::Buffer outSsimBuffer = session.device.CreateBuffer(&f32StorageDesc);
-    const std::size_t statsF32Bytes = readIntermediateStats ? f32Bytes : sizeof(float);
-    wgpu::BufferDescriptor statsStorageDesc = f32StorageDesc;
-    statsStorageDesc.size = static_cast<std::uint64_t>(statsF32Bytes);
-    wgpu::Buffer outMu1Buffer = session.device.CreateBuffer(&statsStorageDesc);
-    wgpu::Buffer outMu2Buffer = session.device.CreateBuffer(&statsStorageDesc);
-    wgpu::Buffer outVar1Buffer = session.device.CreateBuffer(&statsStorageDesc);
-    wgpu::Buffer outVar2Buffer = session.device.CreateBuffer(&statsStorageDesc);
-    wgpu::Buffer outCov12Buffer = session.device.CreateBuffer(&statsStorageDesc);
-    if (!input1Buffer || !input2Buffer || !lab1Buffer || !lab2Buffer || !outSsimBuffer || !outMu1Buffer ||
-        !outMu2Buffer || !outVar1Buffer || !outVar2Buffer || !outCov12Buffer) {
-        throw std::runtime_error("failed to create stage0 buffers");
-    }
-
-    wgpu::BufferDescriptor readbackF32SsimDesc = {};
-    readbackF32SsimDesc.size = static_cast<std::uint64_t>(f32Bytes);
-    readbackF32SsimDesc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
-    readbackF32SsimDesc.mappedAtCreation = false;
-    wgpu::Buffer readbackSsimBuffer = session.device.CreateBuffer(&readbackF32SsimDesc);
-    if (!readbackSsimBuffer) {
-        throw std::runtime_error("failed to create stage0 ssim readback buffer");
-    }
-
-    wgpu::Buffer readbackMu1Buffer;
-    wgpu::Buffer readbackMu2Buffer;
-    wgpu::Buffer readbackVar1Buffer;
-    wgpu::Buffer readbackVar2Buffer;
-    wgpu::Buffer readbackCov12Buffer;
-    if (readIntermediateStats) {
-        wgpu::BufferDescriptor readbackF32Desc = {};
-        readbackF32Desc.size = static_cast<std::uint64_t>(f32Bytes);
-        readbackF32Desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
-        readbackF32Desc.mappedAtCreation = false;
-        readbackMu1Buffer = session.device.CreateBuffer(&readbackF32Desc);
-        readbackMu2Buffer = session.device.CreateBuffer(&readbackF32Desc);
-        readbackVar1Buffer = session.device.CreateBuffer(&readbackF32Desc);
-        readbackVar2Buffer = session.device.CreateBuffer(&readbackF32Desc);
-        readbackCov12Buffer = session.device.CreateBuffer(&readbackF32Desc);
-        if (!readbackMu1Buffer || !readbackMu2Buffer || !readbackVar1Buffer || !readbackVar2Buffer ||
-            !readbackCov12Buffer) {
-            throw std::runtime_error("failed to create stage0 stats readback buffers");
-        }
-    }
-
-    wgpu::BufferDescriptor paramsDesc = {};
-    paramsDesc.size = static_cast<std::uint64_t>(sizeof(ParamsData));
-    paramsDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
-    paramsDesc.mappedAtCreation = false;
-    wgpu::Buffer paramsBuffer = session.device.CreateBuffer(&paramsDesc);
-    if (!paramsBuffer) {
-        throw std::runtime_error("failed to create stage0 params buffer");
-    }
-    const auto finish_CreateBuffers = std::chrono::steady_clock::now();
-    outputs.createBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateBuffers - start_CreateBuffers);
-
-    wgpu::Queue queue = session.device.GetQueue();
-    const auto start_WriteInputBuffers = std::chrono::steady_clock::now();
-    queue.WriteBuffer(input1Buffer, 0, input1.data(), rgbaBytes);
-    queue.WriteBuffer(input2Buffer, 0, input2.data(), rgbaBytes);
-    queue.WriteBuffer(paramsBuffer, 0, &paramsData, sizeof(ParamsData));
-    const auto finish_WriteInputBuffers = std::chrono::steady_clock::now();
-    outputs.writeInputBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_WriteInputBuffers - start_WriteInputBuffers);
-
     if (!session.preprocessShader || !session.stage0Shader) {
         throw std::runtime_error("failed to create stage0/preprocess shader module");
     }
     if (!session.preprocessBindGroupLayout || !session.preprocessPipelineLayout || !session.preprocessPipeline) {
         throw std::runtime_error("failed to create preprocess pipeline");
     }
-    const auto start_CreateBindGroups = std::chrono::steady_clock::now();
-
-    wgpu::BindGroupEntry preprocessBg1Entries[3] = {};
-    preprocessBg1Entries[0].binding = 0;
-    preprocessBg1Entries[0].buffer = input1Buffer;
-    preprocessBg1Entries[0].size = static_cast<std::uint64_t>(rgbaBytes);
-    preprocessBg1Entries[1].binding = 1;
-    preprocessBg1Entries[1].buffer = lab1Buffer;
-    preprocessBg1Entries[1].size = static_cast<std::uint64_t>(labBytes);
-    preprocessBg1Entries[2].binding = 2;
-    preprocessBg1Entries[2].buffer = paramsBuffer;
-    preprocessBg1Entries[2].size = static_cast<std::uint64_t>(sizeof(ParamsData));
-
-    wgpu::BindGroupEntry preprocessBg2Entries[3] = {};
-    preprocessBg2Entries[0].binding = 0;
-    preprocessBg2Entries[0].buffer = input2Buffer;
-    preprocessBg2Entries[0].size = static_cast<std::uint64_t>(rgbaBytes);
-    preprocessBg2Entries[1].binding = 1;
-    preprocessBg2Entries[1].buffer = lab2Buffer;
-    preprocessBg2Entries[1].size = static_cast<std::uint64_t>(labBytes);
-    preprocessBg2Entries[2].binding = 2;
-    preprocessBg2Entries[2].buffer = paramsBuffer;
-    preprocessBg2Entries[2].size = static_cast<std::uint64_t>(sizeof(ParamsData));
-
-    wgpu::BindGroupDescriptor preprocessBg1Desc = {};
-    preprocessBg1Desc.layout = session.preprocessBindGroupLayout;
-    preprocessBg1Desc.entryCount = 3;
-    preprocessBg1Desc.entries = preprocessBg1Entries;
-    wgpu::BindGroup preprocessBg1 = session.device.CreateBindGroup(&preprocessBg1Desc);
-    wgpu::BindGroupDescriptor preprocessBg2Desc = {};
-    preprocessBg2Desc.layout = session.preprocessBindGroupLayout;
-    preprocessBg2Desc.entryCount = 3;
-    preprocessBg2Desc.entries = preprocessBg2Entries;
-    wgpu::BindGroup preprocessBg2 = session.device.CreateBindGroup(&preprocessBg2Desc);
-    if (!preprocessBg1 || !preprocessBg2) {
-        throw std::runtime_error("failed to create preprocess bind groups");
-    }
-
     if (!session.stage0BindGroupLayout || !session.stage0PipelineLayout || !session.stage0Pipeline) {
         throw std::runtime_error("failed to create stage0 compute pipeline");
     }
 
-    wgpu::BindGroupEntry bgEntries[9] = {};
-    bgEntries[0].binding = 0;
-    bgEntries[0].buffer = lab1Buffer;
-    bgEntries[0].offset = 0;
-    bgEntries[0].size = static_cast<std::uint64_t>(labBytes);
+    std::unique_ptr<Stage0Resources>& resourceSlot =
+        readIntermediateStats ? session.debugStage0Resources : session.stage0Resources;
+    if (!resourceSlot || resourceSlot->capacity < elemCount) {
+        auto resources = std::make_unique<Stage0Resources>();
+        resources->capacity = elemCount;
+        const std::size_t capacityRgbaBytes = elemCount * sizeof(LinearRgba);
+        const std::size_t capacityLabBytes = elemCount * sizeof(float) * 4u;
+        const std::size_t capacityF32Bytes = elemCount * sizeof(float);
+        const std::size_t capacityStatsF32Bytes =
+            readIntermediateStats ? capacityF32Bytes : sizeof(float);
 
-    bgEntries[1].binding = 1;
-    bgEntries[1].buffer = lab2Buffer;
-    bgEntries[1].offset = 0;
-    bgEntries[1].size = static_cast<std::uint64_t>(labBytes);
+        const auto start_CreateBuffers = std::chrono::steady_clock::now();
+        wgpu::BufferDescriptor rgbaStorageDesc = {};
+        rgbaStorageDesc.size = static_cast<std::uint64_t>(capacityRgbaBytes);
+        rgbaStorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        resources->input1Buffer = session.device.CreateBuffer(&rgbaStorageDesc);
+        resources->input2Buffer = session.device.CreateBuffer(&rgbaStorageDesc);
 
-    bgEntries[2].binding = 2;
-    bgEntries[2].buffer = outSsimBuffer;
-    bgEntries[2].offset = 0;
-    bgEntries[2].size = static_cast<std::uint64_t>(f32Bytes);
+        wgpu::BufferDescriptor labStorageDesc = {};
+        labStorageDesc.size = static_cast<std::uint64_t>(capacityLabBytes);
+        labStorageDesc.usage = wgpu::BufferUsage::Storage;
+        resources->lab1Buffer = session.device.CreateBuffer(&labStorageDesc);
+        resources->lab2Buffer = session.device.CreateBuffer(&labStorageDesc);
 
-    bgEntries[3].binding = 3;
-    bgEntries[3].buffer = outMu1Buffer;
-    bgEntries[3].offset = 0;
-    bgEntries[3].size = static_cast<std::uint64_t>(statsF32Bytes);
+        wgpu::BufferDescriptor f32StorageDesc = {};
+        f32StorageDesc.size = static_cast<std::uint64_t>(capacityF32Bytes);
+        f32StorageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+        resources->outSsimBuffer = session.device.CreateBuffer(&f32StorageDesc);
 
-    bgEntries[4].binding = 4;
-    bgEntries[4].buffer = outMu2Buffer;
-    bgEntries[4].offset = 0;
-    bgEntries[4].size = static_cast<std::uint64_t>(statsF32Bytes);
+        wgpu::BufferDescriptor statsStorageDesc = f32StorageDesc;
+        statsStorageDesc.size = static_cast<std::uint64_t>(capacityStatsF32Bytes);
+        resources->outMu1Buffer = session.device.CreateBuffer(&statsStorageDesc);
+        resources->outMu2Buffer = session.device.CreateBuffer(&statsStorageDesc);
+        resources->outVar1Buffer = session.device.CreateBuffer(&statsStorageDesc);
+        resources->outVar2Buffer = session.device.CreateBuffer(&statsStorageDesc);
+        resources->outCov12Buffer = session.device.CreateBuffer(&statsStorageDesc);
 
-    bgEntries[5].binding = 5;
-    bgEntries[5].buffer = outVar1Buffer;
-    bgEntries[5].offset = 0;
-    bgEntries[5].size = static_cast<std::uint64_t>(statsF32Bytes);
+        wgpu::BufferDescriptor readbackDesc = {};
+        readbackDesc.size = static_cast<std::uint64_t>(capacityF32Bytes);
+        readbackDesc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+        resources->readbackSsimBuffer = session.device.CreateBuffer(&readbackDesc);
+        if (readIntermediateStats) {
+            resources->readbackMu1Buffer = session.device.CreateBuffer(&readbackDesc);
+            resources->readbackMu2Buffer = session.device.CreateBuffer(&readbackDesc);
+            resources->readbackVar1Buffer = session.device.CreateBuffer(&readbackDesc);
+            resources->readbackVar2Buffer = session.device.CreateBuffer(&readbackDesc);
+            resources->readbackCov12Buffer = session.device.CreateBuffer(&readbackDesc);
+        }
 
-    bgEntries[6].binding = 6;
-    bgEntries[6].buffer = outVar2Buffer;
-    bgEntries[6].offset = 0;
-    bgEntries[6].size = static_cast<std::uint64_t>(statsF32Bytes);
+        wgpu::BufferDescriptor paramsDesc = {};
+        paramsDesc.size = static_cast<std::uint64_t>(sizeof(ParamsData));
+        paramsDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+        resources->paramsBuffer = session.device.CreateBuffer(&paramsDesc);
 
-    bgEntries[7].binding = 7;
-    bgEntries[7].buffer = outCov12Buffer;
-    bgEntries[7].offset = 0;
-    bgEntries[7].size = static_cast<std::uint64_t>(statsF32Bytes);
+        if (!resources->input1Buffer || !resources->input2Buffer || !resources->lab1Buffer ||
+            !resources->lab2Buffer || !resources->outSsimBuffer || !resources->outMu1Buffer ||
+            !resources->outMu2Buffer || !resources->outVar1Buffer || !resources->outVar2Buffer ||
+            !resources->outCov12Buffer || !resources->readbackSsimBuffer || !resources->paramsBuffer) {
+            throw std::runtime_error("failed to create reusable stage0 buffers");
+        }
+        if (readIntermediateStats &&
+            (!resources->readbackMu1Buffer || !resources->readbackMu2Buffer ||
+             !resources->readbackVar1Buffer || !resources->readbackVar2Buffer ||
+             !resources->readbackCov12Buffer)) {
+            throw std::runtime_error("failed to create reusable stage0 stats readback buffers");
+        }
+        const auto finish_CreateBuffers = std::chrono::steady_clock::now();
+        outputs.createBuffers_time =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                finish_CreateBuffers - start_CreateBuffers);
 
-    bgEntries[8].binding = 8;
-    bgEntries[8].buffer = paramsBuffer;
-    bgEntries[8].offset = 0;
-    bgEntries[8].size = static_cast<std::uint64_t>(sizeof(ParamsData));
+        const auto start_CreateBindGroups = std::chrono::steady_clock::now();
+        wgpu::BindGroupEntry preprocessBg1Entries[3] = {};
+        preprocessBg1Entries[0].binding = 0;
+        preprocessBg1Entries[0].buffer = resources->input1Buffer;
+        preprocessBg1Entries[0].size = static_cast<std::uint64_t>(capacityRgbaBytes);
+        preprocessBg1Entries[1].binding = 1;
+        preprocessBg1Entries[1].buffer = resources->lab1Buffer;
+        preprocessBg1Entries[1].size = static_cast<std::uint64_t>(capacityLabBytes);
+        preprocessBg1Entries[2].binding = 2;
+        preprocessBg1Entries[2].buffer = resources->paramsBuffer;
+        preprocessBg1Entries[2].size = static_cast<std::uint64_t>(sizeof(ParamsData));
 
-    wgpu::BindGroupDescriptor bgDesc = {};
-    bgDesc.layout = session.stage0BindGroupLayout;
-    bgDesc.entryCount = 9;
-    bgDesc.entries = bgEntries;
-    wgpu::BindGroup bindGroup = session.device.CreateBindGroup(&bgDesc);
-    if (!bindGroup) {
-        throw std::runtime_error("failed to create stage0 bind group");
+        wgpu::BindGroupEntry preprocessBg2Entries[3] = {};
+        preprocessBg2Entries[0].binding = 0;
+        preprocessBg2Entries[0].buffer = resources->input2Buffer;
+        preprocessBg2Entries[0].size = static_cast<std::uint64_t>(capacityRgbaBytes);
+        preprocessBg2Entries[1].binding = 1;
+        preprocessBg2Entries[1].buffer = resources->lab2Buffer;
+        preprocessBg2Entries[1].size = static_cast<std::uint64_t>(capacityLabBytes);
+        preprocessBg2Entries[2].binding = 2;
+        preprocessBg2Entries[2].buffer = resources->paramsBuffer;
+        preprocessBg2Entries[2].size = static_cast<std::uint64_t>(sizeof(ParamsData));
+
+        wgpu::BindGroupDescriptor preprocessBg1Desc = {};
+        preprocessBg1Desc.layout = session.preprocessBindGroupLayout;
+        preprocessBg1Desc.entryCount = 3;
+        preprocessBg1Desc.entries = preprocessBg1Entries;
+        resources->preprocessBindGroup1 = session.device.CreateBindGroup(&preprocessBg1Desc);
+        wgpu::BindGroupDescriptor preprocessBg2Desc = {};
+        preprocessBg2Desc.layout = session.preprocessBindGroupLayout;
+        preprocessBg2Desc.entryCount = 3;
+        preprocessBg2Desc.entries = preprocessBg2Entries;
+        resources->preprocessBindGroup2 = session.device.CreateBindGroup(&preprocessBg2Desc);
+
+        wgpu::BindGroupEntry bgEntries[9] = {};
+        bgEntries[0].binding = 0;
+        bgEntries[0].buffer = resources->lab1Buffer;
+        bgEntries[0].size = static_cast<std::uint64_t>(capacityLabBytes);
+        bgEntries[1].binding = 1;
+        bgEntries[1].buffer = resources->lab2Buffer;
+        bgEntries[1].size = static_cast<std::uint64_t>(capacityLabBytes);
+        bgEntries[2].binding = 2;
+        bgEntries[2].buffer = resources->outSsimBuffer;
+        bgEntries[2].size = static_cast<std::uint64_t>(capacityF32Bytes);
+        bgEntries[3].binding = 3;
+        bgEntries[3].buffer = resources->outMu1Buffer;
+        bgEntries[3].size = static_cast<std::uint64_t>(capacityStatsF32Bytes);
+        bgEntries[4].binding = 4;
+        bgEntries[4].buffer = resources->outMu2Buffer;
+        bgEntries[4].size = static_cast<std::uint64_t>(capacityStatsF32Bytes);
+        bgEntries[5].binding = 5;
+        bgEntries[5].buffer = resources->outVar1Buffer;
+        bgEntries[5].size = static_cast<std::uint64_t>(capacityStatsF32Bytes);
+        bgEntries[6].binding = 6;
+        bgEntries[6].buffer = resources->outVar2Buffer;
+        bgEntries[6].size = static_cast<std::uint64_t>(capacityStatsF32Bytes);
+        bgEntries[7].binding = 7;
+        bgEntries[7].buffer = resources->outCov12Buffer;
+        bgEntries[7].size = static_cast<std::uint64_t>(capacityStatsF32Bytes);
+        bgEntries[8].binding = 8;
+        bgEntries[8].buffer = resources->paramsBuffer;
+        bgEntries[8].size = static_cast<std::uint64_t>(sizeof(ParamsData));
+
+        wgpu::BindGroupDescriptor bgDesc = {};
+        bgDesc.layout = session.stage0BindGroupLayout;
+        bgDesc.entryCount = 9;
+        bgDesc.entries = bgEntries;
+        resources->stage0BindGroup = session.device.CreateBindGroup(&bgDesc);
+        if (!resources->preprocessBindGroup1 || !resources->preprocessBindGroup2 ||
+            !resources->stage0BindGroup) {
+            throw std::runtime_error("failed to create reusable stage0 bind groups");
+        }
+        const auto finish_CreateBindGroups = std::chrono::steady_clock::now();
+        outputs.createBindGroups_time =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                finish_CreateBindGroups - start_CreateBindGroups);
+        resourceSlot = std::move(resources);
     }
-    const auto finish_CreateBindGroups = std::chrono::steady_clock::now();
-    outputs.createBindGroups_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_CreateBindGroups - start_CreateBindGroups);
+
+    Stage0Resources& resources = *resourceSlot;
+    wgpu::Queue queue = session.device.GetQueue();
+    const auto start_WriteInputBuffers = std::chrono::steady_clock::now();
+    queue.WriteBuffer(resources.input1Buffer, 0, input1.data(), rgbaBytes);
+    queue.WriteBuffer(resources.input2Buffer, 0, input2.data(), rgbaBytes);
+    queue.WriteBuffer(resources.paramsBuffer, 0, &paramsData, sizeof(ParamsData));
+    const auto finish_WriteInputBuffers = std::chrono::steady_clock::now();
+    outputs.writeInputBuffers_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            finish_WriteInputBuffers - start_WriteInputBuffers);
+
     const auto start_DispatchAndSubmit = std::chrono::steady_clock::now();
 
     const std::uint32_t wgX = (width + 15u) / 16u;
@@ -1004,9 +1014,9 @@ ScaleOutputs RunStage0Compute(
         wgpu::ComputePassDescriptor passDesc = {};
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.preprocessPipeline);
-        pass.SetBindGroup(0, preprocessBg1);
+        pass.SetBindGroup(0, resources.preprocessBindGroup1);
         pass.DispatchWorkgroups(wgX, wgY, 1);
-        pass.SetBindGroup(0, preprocessBg2);
+        pass.SetBindGroup(0, resources.preprocessBindGroup2);
         pass.DispatchWorkgroups(wgX, wgY, 1);
         pass.End();
     }
@@ -1014,17 +1024,27 @@ ScaleOutputs RunStage0Compute(
         wgpu::ComputePassDescriptor passDesc = {};
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.stage0Pipeline);
-        pass.SetBindGroup(0, bindGroup);
+        pass.SetBindGroup(0, resources.stage0BindGroup);
         pass.DispatchWorkgroups(wgX, wgY, 1);
         pass.End();
     }
-    encoder.CopyBufferToBuffer(outSsimBuffer, 0, readbackSsimBuffer, 0, static_cast<std::uint64_t>(f32Bytes));
+    encoder.CopyBufferToBuffer(
+        resources.outSsimBuffer,
+        0,
+        resources.readbackSsimBuffer,
+        0,
+        static_cast<std::uint64_t>(f32Bytes));
     if (readIntermediateStats) {
-        encoder.CopyBufferToBuffer(outMu1Buffer, 0, readbackMu1Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
-        encoder.CopyBufferToBuffer(outMu2Buffer, 0, readbackMu2Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
-        encoder.CopyBufferToBuffer(outVar1Buffer, 0, readbackVar1Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
-        encoder.CopyBufferToBuffer(outVar2Buffer, 0, readbackVar2Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
-        encoder.CopyBufferToBuffer(outCov12Buffer, 0, readbackCov12Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
+        encoder.CopyBufferToBuffer(
+            resources.outMu1Buffer, 0, resources.readbackMu1Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
+        encoder.CopyBufferToBuffer(
+            resources.outMu2Buffer, 0, resources.readbackMu2Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
+        encoder.CopyBufferToBuffer(
+            resources.outVar1Buffer, 0, resources.readbackVar1Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
+        encoder.CopyBufferToBuffer(
+            resources.outVar2Buffer, 0, resources.readbackVar2Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
+        encoder.CopyBufferToBuffer(
+            resources.outCov12Buffer, 0, resources.readbackCov12Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
     }
 
     wgpu::CommandBuffer commandBuffer = encoder.Finish();
@@ -1036,15 +1056,21 @@ ScaleOutputs RunStage0Compute(
     outputs.width = width;
     outputs.height = height;
     const auto start_Readback = std::chrono::steady_clock::now();
-    const auto ssimBytes = ReadBufferBlocking(session.instance, readbackSsimBuffer, f32Bytes);
+    const auto ssimBytes =
+        ReadBufferBlocking(session.instance, resources.readbackSsimBuffer, f32Bytes);
     outputs.ssimMap.resize(elemCount);
     std::memcpy(outputs.ssimMap.data(), ssimBytes.data(), f32Bytes);
     if (readIntermediateStats) {
-        const auto mu1Bytes = ReadBufferBlocking(session.instance, readbackMu1Buffer, f32Bytes);
-        const auto mu2Bytes = ReadBufferBlocking(session.instance, readbackMu2Buffer, f32Bytes);
-        const auto var1Bytes = ReadBufferBlocking(session.instance, readbackVar1Buffer, f32Bytes);
-        const auto var2Bytes = ReadBufferBlocking(session.instance, readbackVar2Buffer, f32Bytes);
-        const auto cov12Bytes = ReadBufferBlocking(session.instance, readbackCov12Buffer, f32Bytes);
+        const auto mu1Bytes =
+            ReadBufferBlocking(session.instance, resources.readbackMu1Buffer, f32Bytes);
+        const auto mu2Bytes =
+            ReadBufferBlocking(session.instance, resources.readbackMu2Buffer, f32Bytes);
+        const auto var1Bytes =
+            ReadBufferBlocking(session.instance, resources.readbackVar1Buffer, f32Bytes);
+        const auto var2Bytes =
+            ReadBufferBlocking(session.instance, resources.readbackVar2Buffer, f32Bytes);
+        const auto cov12Bytes =
+            ReadBufferBlocking(session.instance, resources.readbackCov12Buffer, f32Bytes);
         outputs.mu1.resize(elemCount);
         outputs.mu2.resize(elemCount);
         outputs.var1.resize(elemCount);
@@ -1489,7 +1515,7 @@ void PrintProfilingBuckets(
 }
 
 void RunComparison(
-    const GpuSession& session,
+    GpuSession& session,
     const CliOptions& options,
     const ComparisonRequest& request) {
     const DecodedImage image1 = LoadPngRgba8(request.image1);
@@ -1691,7 +1717,7 @@ int main(int argc, char** argv) {
         const auto labPreprocessShaderPath = ResolveShaderPath(argv[0], "lab_preprocess.wgsl");
         const auto stage0ShaderSource = ReadAllText(stage0ShaderPath);
         const auto labPreprocessShaderSource = ReadAllText(labPreprocessShaderPath);
-        const GpuSession session =
+        GpuSession session =
             CreateGpuSession(labPreprocessShaderSource, stage0ShaderSource);
         if (options.profilingEnabled) {
             PrintProfilingBuckets(
