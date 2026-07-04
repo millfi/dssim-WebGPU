@@ -2,23 +2,13 @@
 
 This repository also contains an experimental WebGPU implementation in `src_gpu/`.
 
-- Binary: `dssim-WebGPU`
-- Input format today: PNG only (decoded with `libpng`)
-- Runtime dependency inside GPU binary: no `dssim` CLI dependency
-- Language standard: C++20 (set by CMake defaults; no extra build flag required)
-- Current state: working end-to-end, but not bit-exact with the reference yet on every image pair
+- バイナリ名: `dssim-WebGPU`
+- 入力画像: PNG only (decoded with `libpng`)
+- 使用言語: C++20 (set by CMake defaults; no extra build flag required)
+- スコア一致目標: 浮動小数点数の加算や乗算を、結合法則を満たすとして式変形した結果による、浮動小数点数が実際にはこれらの結合法則を満たさないことによるreferenceからのスコアの不一致は受け入れる。
+### Build and run (PowerShell7)
 
-As of February 21, 2026, for `tests/1440p.png` vs `tests/1440p.jxl.png`:
-
-- Reference (dssim v3.4.0): `0.00044658`
-- WebGPU : `0.00044330`
-`.\tests\0.02s.png` vs `.\tests\0s.png`:
-- Reference (dssim v3.4.0): `0.00113154`
-- WebGPU : `0.00112473`
-### Build and run (PowerShell)
-
-No explicit C++ standard option is needed. `CMakeLists.txt` enforces C++20 globally.
-
+`CMakeLists.txt` でC++20を使うようコンパイルオプションを設定
 ```powershell
 cmake -S . -B build
 
@@ -51,7 +41,7 @@ You can explicitly disable the sample with `-DDSSIM_ENABLE_DAWN_SAMPLE=OFF`.
 
 ### Profiling output
 
-When `--profiling` is specified, the executable prints MECE profiling buckets in milliseconds:
+When `--profiling` is specified, the executable prints MECE(現時点では、非同期を使い始めるとMECEは無理になる) profiling buckets in milliseconds:
 
 - `session_init_total_ms`
 - `session_init_pipeline_setup_ms`
@@ -102,7 +92,6 @@ To disable this behavior, pass `-DDSSIM_AUTO_INSTALL_DAWN=OFF`.
 - Images must have the same width/height.
 - `--debug-dump-dir` emits intermediate GPU buffers for mismatch analysis.
 - The default backend on Windows is D3D12.
-
 
 
 ### Score-matching workflow
