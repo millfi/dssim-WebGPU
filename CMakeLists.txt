@@ -222,7 +222,7 @@ if(DSSIM_BUILD_DAWN_SAMPLE)
         endforeach()
     endif()
 
-    add_custom_command(TARGET dssim_webgpu POST_BUILD
+    add_custom_target(dssim_webgpu_shaders
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:dssim_webgpu>/shaders"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_STAGE0_SHADER}"
@@ -233,7 +233,13 @@ if(DSSIM_BUILD_DAWN_SAMPLE)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_LAB_PREPROCESS_SHADER}"
             "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/lab_preprocess.wgsl"
+        DEPENDS
+            "${DSSIM_GPU_STAGE0_SHADER}"
+            "${DSSIM_GPU_DOWNSAMPLE_SHADER}"
+            "${DSSIM_GPU_LAB_PREPROCESS_SHADER}"
+        VERBATIM
     )
+    add_dependencies(dssim_webgpu dssim_webgpu_shaders)
 endif()
 
 
