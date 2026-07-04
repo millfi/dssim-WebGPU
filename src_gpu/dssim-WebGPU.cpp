@@ -34,10 +34,12 @@ constexpr std::uint32_t kStage0WindowSize = kStage0WindowRadius * 2u + 1u;
 constexpr std::array<double, 5> kDefaultScaleWeights = {0.028, 0.197, 0.322, 0.298, 0.155};
 
 struct LinearRgba {
-    float r = 0.0f;
-    float g = 0.0f;
-    float b = 0.0f;
-    float a = 0.0f;
+    LinearRgba() noexcept {}
+
+    float r;
+    float g;
+    float b;
+    float a;
 };
 
 struct CliOptions {
@@ -362,14 +364,14 @@ std::uint8_t ToUnorm8(float value) {
 template <typename Function>
 void ParallelFor(
     std::size_t itemCount,
-    std::size_t minItemsPerWorker,
     Function&& function) {
     const unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
     const std::size_t maxWorkers = std::max<std::size_t>(1u, hardwareThreads / 2u);
-    const std::size_t usefulWorkers =
-        std::max<std::size_t>(1u, (itemCount + minItemsPerWorker - 1u) / minItemsPerWorker);
-    const std::size_t workerCount = std::min(maxWorkers, usefulWorkers);
-    if (workerCount <= 1u) {
+    const std::size_t workerCount = std::min(maxWorkers, itemCount);
+    if (workerCount == 0u) {
+        return;
+    }
+    if (workerCount == 1u) {
         function(0u, itemCount);
         return;
     }
@@ -405,7 +407,7 @@ std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>&
         }
         return lut;
     }();
-    ParallelFor(pixelCount, 262144u, [&](std::size_t begin, std::size_t end) {
+    ParallelFor(pixelCount, [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
             const std::size_t base = i * 4;
             const float a = static_cast<float>(bytes[base + 3]) / 255.0f;
@@ -1095,7 +1097,7 @@ DownsampleOutputs RunDownsample2x2Cpu(
     out.height = outHeight;
     out.pixels.resize(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight));
 
-    ParallelFor(outHeight, 128u, [&](std::size_t beginRow, std::size_t endRow) {
+    ParallelFor(outHeight, [&](std::size_t beginRow, std::size_t endRow) {
         for (std::size_t oy = beginRow; oy < endRow; ++oy) {
             const std::size_t row0 = (oy * 2u) * inWidth;
             const std::size_t row1 = row0 + inWidth;
@@ -1563,20 +1565,13 @@ void RunComparison(
             break;
         }
 
-        DownsampleOutputs next1;
-        DownsampleOutputs next2;
-        if (curr1.size() >= 262144u) {
-            auto next1Future = std::async(
-                std::launch::async,
-                [&curr1, currWidth, currHeight] {
-                    return RunDownsample2x2Cpu(curr1, currWidth, currHeight);
-                });
-            next2 = RunDownsample2x2Cpu(curr2, currWidth, currHeight);
-            next1 = next1Future.get();
-        } else {
-            next1 = RunDownsample2x2Cpu(curr1, currWidth, currHeight);
-            next2 = RunDownsample2x2Cpu(curr2, currWidth, currHeight);
-        }
+        auto next1Future = std::async(
+            std::launch::async,
+            [&curr1, currWidth, currHeight] {
+                return RunDownsample2x2Cpu(curr1, currWidth, currHeight);
+            });
+        DownsampleOutputs next2 = RunDownsample2x2Cpu(curr2, currWidth, currHeight);
+        DownsampleOutputs next1 = next1Future.get();
         createShaderModuleProcessingTime += next1.createShaderModule_time + next2.createShaderModule_time;
         createPSOProcessingTime += next1.createPSO_time + next2.createPSO_time;
         createBuffersProcessingTime += next1.createBuffers_time + next2.createBuffers_time;
