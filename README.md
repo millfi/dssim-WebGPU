@@ -123,13 +123,15 @@ committing an optimization.
 
 ## Profiling output
 
-`--profiling` prints mutually exclusive timing buckets in milliseconds.
+`--profiling` prints mutually exclusive wall-clock timing buckets in
+milliseconds, plus an independent WebGPU Timestamp Query result.
 
 Session initialization:
 
 - `session_init_pipeline_setup_ms`: shader modules, pipeline layouts, and PSOs
 - `session_init_resource_prep_ms`: session-level resource preparation
-- `session_init_gpu_execution_ms`: session-level GPU execution
+- `session_init_gpu_submit_wait_ms`: session-level GPU submission/waiting
+- `session_init_gpu_timestamp_ms`: session-level GPU Timestamp Query duration
 - `session_init_cpu_postprocess_ms`: session-level CPU post-processing
 - `session_init_other_ms`: uncategorized session initialization work
 
@@ -137,7 +139,10 @@ Each comparison:
 
 - `pipeline_setup_ms`: per-comparison shader and pipeline setup
 - `resource_prep_ms`: buffer creation, uploads, and Bind Group creation
-- `gpu_execution_ms`: dispatch/submission plus readback/map waiting
+- `gpu_submit_wait_ms`: CPU wall time for dispatch/submission plus readback/map
+  waiting
+- `gpu_timestamp_ms`: actual GPU execution duration measured by WebGPU
+  Timestamp Query
 - `cpu_postprocess_ms`: CPU-side score aggregation
 - `other_ms`: color conversion, pyramid construction, and other uncategorized
   work after decoding
@@ -154,10 +159,16 @@ fields:
 - `create_bind_group_ms`
 - `dispatch_and_submit_ms`
 - `readback_ms`
+- `gpu_submit_wait_ms`
+- `gpu_timestamp_ms`
 - `post_process_ms`
 
 `dispatch_and_submit_ms` measures CPU command encoding/submission, not pure
 shader execution. `readback_ms` includes GPU completion and mapping wait time.
+`gpu_timestamp_ms` may overlap the wall-clock buckets because CPU and GPU work
+asynchronously, so it is not included in the mutually exclusive total.
+Profiling requires an adapter that supports the WebGPU `TimestampQuery`
+feature.
 
 ## Current performance design
 

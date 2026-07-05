@@ -126,14 +126,15 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 
 ## プロファイリング出力
 
-`--profiling` を指定すると、互いに重複しない時間区分がミリ秒単位で
-表示されます。
+`--profiling` を指定すると、互いに重複しないwall-clock時間区分と、
+独立したWebGPU Timestamp Query結果がミリ秒単位で表示されます。
 
 セッション初期化:
 
 - `session_init_pipeline_setup_ms`: シェーダー、Pipeline Layout、PSOの作成
 - `session_init_resource_prep_ms`: セッション単位のリソース準備
-- `session_init_gpu_execution_ms`: セッション単位のGPU実行
+- `session_init_gpu_submit_wait_ms`: セッション単位のGPU送信・待機
+- `session_init_gpu_timestamp_ms`: セッション単位のGPU Timestamp Query時間
 - `session_init_cpu_postprocess_ms`: セッション単位のCPU後処理
 - `session_init_other_ms`: 上記以外のセッション初期化
 
@@ -141,7 +142,8 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 
 - `pipeline_setup_ms`: 比較単位のシェーダーとパイプライン準備
 - `resource_prep_ms`: バッファ作成、アップロード、Bind Group作成
-- `gpu_execution_ms`: ディスパッチ、サブミット、readback/map待機
+- `gpu_submit_wait_ms`: ディスパッチ、サブミット、readback/map待機のCPU wall時間
+- `gpu_timestamp_ms`: WebGPU Timestamp Queryで測定した実GPU実行時間
 - `cpu_postprocess_ms`: CPU側のスコア集計
 - `other_ms`: 色変換、画像ピラミッド生成など、デコード完了後の未分類処理
 
@@ -157,11 +159,15 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 - `create_bind_group_ms`
 - `dispatch_and_submit_ms`
 - `readback_ms`
+- `gpu_submit_wait_ms`
+- `gpu_timestamp_ms`
 - `post_process_ms`
 
 `dispatch_and_submit_ms` はCPU側のコマンド構築・送信時間であり、
 純粋なシェーダー実行時間ではありません。`readback_ms` にはGPU完了待ちと
-マッピング待ちが含まれます。
+マッピング待ちが含まれます。CPUとGPUは非同期に重なるため、
+`gpu_timestamp_ms` はwall-clock時間区分の合計には含まれません。
+プロファイリングにはWebGPU `TimestampQuery` feature対応adapterが必要です。
 
 ## 現在の高速化設計
 

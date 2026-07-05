@@ -80,6 +80,7 @@ struct ScaleOutputs {
     std::chrono::milliseconds dispatchAndSubmit_time{0};
     std::chrono::milliseconds readback_time{0};
     std::chrono::milliseconds postProcess_time{0};
+    double gpuTimestampMs = 0.0;
 };
 
 struct MultiScaleOutputs {
@@ -139,6 +140,7 @@ struct ProfilingSummary {
     std::chrono::milliseconds readbackTime{0};
     std::chrono::milliseconds postProcessTime{0};
     std::chrono::milliseconds otherTime{0};
+    double gpuTimestampMs = 0.0;
 };
 
 struct Stage0Resources {
@@ -196,6 +198,10 @@ struct GpuSession {
     wgpu::Adapter adapter;
     wgpu::Device device;
     std::string adapterName = "unknown";
+    bool timestampQueryEnabled = false;
+    wgpu::QuerySet timestampQuerySet;
+    wgpu::Buffer timestampResolveBuffer;
+    wgpu::Buffer timestampReadbackBuffer;
 
     wgpu::ShaderModule preprocessShader;
     wgpu::ShaderModule stage0Shader;
@@ -231,12 +237,13 @@ struct GpuSession {
 };
 
 struct ProfilingBuckets {
-    std::chrono::milliseconds totalTime{0};
-    std::chrono::milliseconds pipelineSetupTime{0};
-    std::chrono::milliseconds resourcePrepTime{0};
-    std::chrono::milliseconds gpuExecutionTime{0};
-    std::chrono::milliseconds cpuPostProcessTime{0};
-    std::chrono::milliseconds otherTime{0};
+    double totalMs = 0.0;
+    double pipelineSetupMs = 0.0;
+    double resourcePrepMs = 0.0;
+    double gpuSubmitWaitMs = 0.0;
+    double gpuTimestampMs = 0.0;
+    double cpuPostProcessMs = 0.0;
+    double otherMs = 0.0;
 };
 
 std::string EscapeJson(const std::string& input) {
@@ -674,6 +681,10 @@ std::string BuildJson(
     os << "    \"create_bind_group_ms\": " << profiling.createBindGroupsTime.count() << ",\n";
     os << "    \"dispatch_and_submit_ms\": " << profiling.dispatchAndSubmitTime.count() << ",\n";
     os << "    \"readback_ms\": " << profiling.readbackTime.count() << ",\n";
+    os << "    \"gpu_submit_wait_ms\": "
+       << (profiling.dispatchAndSubmitTime + profiling.readbackTime).count() << ",\n";
+    os << "    \"gpu_timestamp_ms\": " << std::setprecision(9)
+       << profiling.gpuTimestampMs << ",\n";
     os << "    \"post_process_ms\": " << profiling.postProcessTime.count() << ",\n";
     os << "    \"other_ms\": " << profiling.otherTime.count() << "\n";
     os << "  }";
@@ -839,6 +850,52 @@ std::vector<std::uint8_t> ReadBufferBlocking(
     }
     buffer.Unmap();
     return data;
+}
+
+void ResolveGpuTimestamps(
+    const GpuSession& session,
+    const wgpu::CommandEncoder& encoder) {
+    if (!session.timestampQueryEnabled) {
+        return;
+    }
+    encoder.ResolveQuerySet(
+        session.timestampQuerySet,
+        0,
+        2,
+        session.timestampResolveBuffer,
+        0);
+    encoder.CopyBufferToBuffer(
+        session.timestampResolveBuffer,
+        0,
+        session.timestampReadbackBuffer,
+        0,
+        2u * sizeof(std::uint64_t));
+}
+
+double ReadGpuTimestampMs(GpuSession& session) {
+    if (!session.timestampQueryEnabled) {
+        return 0.0;
+    }
+    constexpr std::size_t kTimestampBytes = 2u * sizeof(std::uint64_t);
+    MapBufferBlocking(
+        session.instance,
+        session.timestampReadbackBuffer,
+        kTimestampBytes);
+    const void* mapped =
+        session.timestampReadbackBuffer.GetConstMappedRange(0, kTimestampBytes);
+    if (mapped == nullptr) {
+        session.timestampReadbackBuffer.Unmap();
+        throw std::runtime_error("timestamp GetConstMappedRange returned null");
+    }
+    std::array<std::uint64_t, 2> timestamps{};
+    std::memcpy(timestamps.data(), mapped, kTimestampBytes);
+    session.timestampReadbackBuffer.Unmap();
+    if (timestamps[1] < timestamps[0]) {
+        throw std::runtime_error("GPU timestamp query returned a negative duration");
+    }
+    // Dawn converts timestamp-query ticks to nanoseconds unless its internal
+    // disable_timestamp_query_conversion toggle is explicitly enabled.
+    return static_cast<double>(timestamps[1] - timestamps[0]) / 1'000'000.0;
 }
 
 double SumF32(const float* values, std::size_t valueCount) {
@@ -1104,6 +1161,12 @@ ScaleOutputs RunStage0Compute(
     wgpu::CommandEncoder encoder = session.device.CreateCommandEncoder();
     {
         wgpu::ComputePassDescriptor passDesc = {};
+        wgpu::PassTimestampWrites timestampWrites = {};
+        if (session.timestampQueryEnabled) {
+            timestampWrites.querySet = session.timestampQuerySet;
+            timestampWrites.beginningOfPassWriteIndex = 0;
+            passDesc.timestampWrites = &timestampWrites;
+        }
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.preprocessPipeline);
         pass.SetBindGroup(0, resources.preprocessBindGroup1);
@@ -1114,6 +1177,12 @@ ScaleOutputs RunStage0Compute(
     }
     {
         wgpu::ComputePassDescriptor passDesc = {};
+        wgpu::PassTimestampWrites timestampWrites = {};
+        if (session.timestampQueryEnabled) {
+            timestampWrites.querySet = session.timestampQuerySet;
+            timestampWrites.endOfPassWriteIndex = 1;
+            passDesc.timestampWrites = &timestampWrites;
+        }
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.stage0Pipeline);
         pass.SetBindGroup(0, resources.stage0BindGroup);
@@ -1138,6 +1207,7 @@ ScaleOutputs RunStage0Compute(
         encoder.CopyBufferToBuffer(
             resources.outCov12Buffer, 0, resources.readbackCov12Buffer, 0, static_cast<std::uint64_t>(f32Bytes));
     }
+    ResolveGpuTimestamps(session, encoder);
 
     wgpu::CommandBuffer commandBuffer = encoder.Finish();
     queue.Submit(1, &commandBuffer);
@@ -1175,6 +1245,7 @@ ScaleOutputs RunStage0Compute(
         std::memcpy(outputs.var2.data(), var2Bytes.data(), f32Bytes);
         std::memcpy(outputs.cov12.data(), cov12Bytes.data(), f32Bytes);
     }
+    outputs.gpuTimestampMs = ReadGpuTimestampMs(session);
     const auto finish_Readback = std::chrono::steady_clock::now();
     outputs.readback_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_Readback - start_Readback);
 
@@ -1537,6 +1608,12 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         const std::uint32_t wgX = (widths.front() + 15u) / 16u;
         const std::uint32_t wgY = (heights.front() + 15u) / 16u;
         wgpu::ComputePassDescriptor passDesc = {};
+        wgpu::PassTimestampWrites timestampWrites = {};
+        if (session.timestampQueryEnabled) {
+            timestampWrites.querySet = session.timestampQuerySet;
+            timestampWrites.beginningOfPassWriteIndex = 0;
+            passDesc.timestampWrites = &timestampWrites;
+        }
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.rgba8ToLinearPipeline);
         pass.SetBindGroup(0, convertBindGroup1);
@@ -1549,6 +1626,12 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         const std::uint32_t wgX = (widths[level] + 15u) / 16u;
         const std::uint32_t wgY = (heights[level] + 15u) / 16u;
         wgpu::ComputePassDescriptor passDesc = {};
+        wgpu::PassTimestampWrites timestampWrites = {};
+        if (session.timestampQueryEnabled && level + 1u == levelCount) {
+            timestampWrites.querySet = session.timestampQuerySet;
+            timestampWrites.endOfPassWriteIndex = 1;
+            passDesc.timestampWrites = &timestampWrites;
+        }
         wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
         pass.SetPipeline(session.preprocessPipeline);
         pass.SetBindGroup(0, preprocessBindGroups1[level]);
@@ -1581,6 +1664,7 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             downsamplePass.End();
         }
     }
+    ResolveGpuTimestamps(session, encoder);
     wgpu::CommandBuffer commandBuffer = encoder.Finish();
     queue.Submit(1, &commandBuffer);
     const auto finishDispatch = std::chrono::steady_clock::now();
@@ -1601,6 +1685,7 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         resources.readbackSsimBuffer.Unmap();
         throw std::runtime_error("GetConstMappedRange returned null");
     }
+    outputs.front().gpuTimestampMs = ReadGpuTimestampMs(session);
     const auto finishReadback = std::chrono::steady_clock::now();
     outputs.front().readback_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1853,7 +1938,10 @@ wgpu::Adapter RequestAdapterBlocking(const wgpu::Instance& instance) {
     return state.adapter;
 }
 
-wgpu::Device RequestDeviceBlocking(const wgpu::Instance& instance, const wgpu::Adapter& adapter) {
+wgpu::Device RequestDeviceBlocking(
+    const wgpu::Instance& instance,
+    const wgpu::Adapter& adapter,
+    bool enableTimestampQueries) {
     struct RequestState {
         std::atomic<bool> done{false};
         wgpu::RequestDeviceStatus status = wgpu::RequestDeviceStatus::Error;
@@ -1862,8 +1950,18 @@ wgpu::Device RequestDeviceBlocking(const wgpu::Instance& instance, const wgpu::A
     };
     RequestState state;
 
+    wgpu::DeviceDescriptor descriptor = {};
+    const wgpu::FeatureName timestampFeature = wgpu::FeatureName::TimestampQuery;
+    if (enableTimestampQueries) {
+        if (!adapter.HasFeature(timestampFeature)) {
+            throw std::runtime_error(
+                "selected WebGPU adapter does not support TimestampQuery");
+        }
+        descriptor.requiredFeatureCount = 1;
+        descriptor.requiredFeatures = &timestampFeature;
+    }
     adapter.RequestDevice(
-        nullptr,
+        &descriptor,
         wgpu::CallbackMode::AllowProcessEvents,
         [&state](wgpu::RequestDeviceStatus status, wgpu::Device device, const char* message) {
             state.status = status;
@@ -1894,7 +1992,8 @@ GpuSession CreateGpuSession(
     const std::string& stage0ScoreShaderSource,
     const std::string& downsampleShaderSource,
     const std::string& rgba8ToLinearShaderSource,
-    bool enableDebugPipeline) {
+    bool enableDebugPipeline,
+    bool enableTimestampQueries) {
     GpuSession session;
 
     dawnProcSetProcs(&dawn::native::GetProcs());
@@ -1905,7 +2004,41 @@ GpuSession CreateGpuSession(
     }
 
     session.adapter = RequestAdapterBlocking(session.instance);
-    session.device = RequestDeviceBlocking(session.instance, session.adapter);
+    session.device =
+        RequestDeviceBlocking(session.instance, session.adapter, enableTimestampQueries);
+    session.timestampQueryEnabled = enableTimestampQueries;
+
+    if (session.timestampQueryEnabled) {
+        const auto startCreateTimestampResources = std::chrono::steady_clock::now();
+        wgpu::QuerySetDescriptor querySetDescriptor = {};
+        querySetDescriptor.type = wgpu::QueryType::Timestamp;
+        querySetDescriptor.count = 2;
+        session.timestampQuerySet =
+            session.device.CreateQuerySet(&querySetDescriptor);
+
+        wgpu::BufferDescriptor resolveDescriptor = {};
+        resolveDescriptor.size = 2u * sizeof(std::uint64_t);
+        resolveDescriptor.usage =
+            wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc;
+        session.timestampResolveBuffer =
+            session.device.CreateBuffer(&resolveDescriptor);
+
+        wgpu::BufferDescriptor readbackDescriptor = {};
+        readbackDescriptor.size = 2u * sizeof(std::uint64_t);
+        readbackDescriptor.usage =
+            wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+        session.timestampReadbackBuffer =
+            session.device.CreateBuffer(&readbackDescriptor);
+        if (!session.timestampQuerySet || !session.timestampResolveBuffer ||
+            !session.timestampReadbackBuffer) {
+            throw std::runtime_error(
+                "failed to create TimestampQuery profiling resources");
+        }
+        const auto finishCreateTimestampResources = std::chrono::steady_clock::now();
+        session.initProfiling.createBuffersTime =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                finishCreateTimestampResources - startCreateTimestampResources);
+    }
 
     wgpu::AdapterInfo adapterInfo;
     if (session.adapter.GetInfo(&adapterInfo)) {
@@ -2138,27 +2271,35 @@ ComparisonRequest ParseComparisonRequestLine(const std::string& line) {
 
 ProfilingBuckets BuildRuntimeProfilingBuckets(const ProfilingSummary& profiling) {
     return {
-        .totalTime = std::chrono::milliseconds(profiling.decodeDoneToScoreMs),
-        .pipelineSetupTime =
-            profiling.createShaderModuleTime + profiling.createPipelineLayoutsTime + profiling.createPSOTime,
-        .resourcePrepTime =
-            profiling.createBuffersTime + profiling.writeInputBuffersTime + profiling.createBindGroupsTime,
-        .gpuExecutionTime = profiling.dispatchAndSubmitTime + profiling.readbackTime,
-        .cpuPostProcessTime = profiling.postProcessTime,
-        .otherTime = profiling.otherTime,
+        .totalMs = static_cast<double>(profiling.decodeDoneToScoreMs),
+        .pipelineSetupMs = static_cast<double>(
+            (profiling.createShaderModuleTime + profiling.createPipelineLayoutsTime +
+             profiling.createPSOTime)
+                .count()),
+        .resourcePrepMs = static_cast<double>(
+            (profiling.createBuffersTime + profiling.writeInputBuffersTime +
+             profiling.createBindGroupsTime)
+                .count()),
+        .gpuSubmitWaitMs = static_cast<double>(
+            (profiling.dispatchAndSubmitTime + profiling.readbackTime).count()),
+        .gpuTimestampMs = profiling.gpuTimestampMs,
+        .cpuPostProcessMs = static_cast<double>(profiling.postProcessTime.count()),
+        .otherMs = static_cast<double>(profiling.otherTime.count()),
     };
 }
 
 ProfilingBuckets BuildSessionInitProfilingBuckets(const ProfilingSummary& profiling) {
-    const auto totalTime =
+    const auto pipelineSetupTime =
         profiling.createShaderModuleTime + profiling.createPipelineLayoutsTime + profiling.createPSOTime;
+    const auto resourcePrepTime = profiling.createBuffersTime;
     return {
-        .totalTime = totalTime,
-        .pipelineSetupTime = totalTime,
-        .resourcePrepTime = std::chrono::milliseconds{0},
-        .gpuExecutionTime = std::chrono::milliseconds{0},
-        .cpuPostProcessTime = std::chrono::milliseconds{0},
-        .otherTime = profiling.otherTime,
+        .totalMs = static_cast<double>((pipelineSetupTime + resourcePrepTime).count()),
+        .pipelineSetupMs = static_cast<double>(pipelineSetupTime.count()),
+        .resourcePrepMs = static_cast<double>(resourcePrepTime.count()),
+        .gpuSubmitWaitMs = 0.0,
+        .gpuTimestampMs = 0.0,
+        .cpuPostProcessMs = 0.0,
+        .otherMs = static_cast<double>(profiling.otherTime.count()),
     };
 }
 
@@ -2166,12 +2307,18 @@ void PrintProfilingBuckets(
     const ProfilingBuckets& buckets,
     const std::string_view prefix,
     const std::string_view label) {
-    std::cout << prefix << label << "total_ms = " << buckets.totalTime.count() << '\n';
-    std::cout << prefix << label << "pipeline_setup_ms = " << buckets.pipelineSetupTime.count() << '\n';
-    std::cout << prefix << label << "resource_prep_ms = " << buckets.resourcePrepTime.count() << '\n';
-    std::cout << prefix << label << "gpu_execution_ms = " << buckets.gpuExecutionTime.count() << '\n';
-    std::cout << prefix << label << "cpu_postprocess_ms = " << buckets.cpuPostProcessTime.count() << '\n';
-    std::cout << prefix << label << "other_ms = " << buckets.otherTime.count() << '\n';
+    const auto oldFlags = std::cout.flags();
+    const auto oldPrecision = std::cout.precision();
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << prefix << label << "total_ms = " << buckets.totalMs << '\n';
+    std::cout << prefix << label << "pipeline_setup_ms = " << buckets.pipelineSetupMs << '\n';
+    std::cout << prefix << label << "resource_prep_ms = " << buckets.resourcePrepMs << '\n';
+    std::cout << prefix << label << "gpu_submit_wait_ms = " << buckets.gpuSubmitWaitMs << '\n';
+    std::cout << prefix << label << "gpu_timestamp_ms = " << buckets.gpuTimestampMs << '\n';
+    std::cout << prefix << label << "cpu_postprocess_ms = " << buckets.cpuPostProcessMs << '\n';
+    std::cout << prefix << label << "other_ms = " << buckets.otherMs << '\n';
+    std::cout.flags(oldFlags);
+    std::cout.precision(oldPrecision);
 }
 
 void RunComparison(
@@ -2243,6 +2390,7 @@ void RunComparison(
     milliseconds dispatchAndSubmitProcessingTime{0};
     milliseconds readbackProcessingTime{0};
     milliseconds postProcessProcessingTime{0};
+    double gpuTimestampProcessingMs = 0.0;
 
     if (options.debugDumpEnabled) {
         pyramid1.push_back(std::move(input1));
@@ -2295,6 +2443,7 @@ void RunComparison(
         dispatchAndSubmitProcessingTime += scale.dispatchAndSubmit_time;
         readbackProcessingTime += scale.readback_time;
         postProcessProcessingTime += scale.postProcess_time;
+        gpuTimestampProcessingMs += scale.gpuTimestampMs;
     }
 
     if (identicalInput) {
@@ -2375,6 +2524,7 @@ void RunComparison(
         .readbackTime = readbackProcessingTime,
         .postProcessTime = postProcessProcessingTime,
         .otherTime = milliseconds(decodeDoneToScoreMs) - measuredProcessingTime,
+        .gpuTimestampMs = gpuTimestampProcessingMs,
     };
 
     if (!resultOptions.out.empty()) {
@@ -2411,7 +2561,8 @@ int main(int argc, char** argv) {
                 stage0ScoreShaderSource,
                 downsampleShaderSource,
                 rgba8ToLinearShaderSource,
-                options.debugDumpEnabled);
+                options.debugDumpEnabled,
+                options.profilingEnabled || !options.out.empty());
         if (options.profilingEnabled) {
             PrintProfilingBuckets(
                 BuildSessionInitProfilingBuckets(session.initProfiling),

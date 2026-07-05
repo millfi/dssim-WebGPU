@@ -77,14 +77,16 @@
 
 ## Profiling output
 
-- When `--profiling` is specified, MECE profiling buckets are printed in milliseconds:
+- When `--profiling` is specified, wall-clock MECE profiling buckets are printed in milliseconds:
   - `pipeline_setup_ms`: shader module + pipeline layout + PSO creation
   - `resource_prep_ms`: buffer creation + buffer upload + bind group creation
-  - `gpu_execution_ms`: dispatch/submit + readback/map wait
+  - `gpu_submit_wait_ms`: CPU wall time for dispatch/submit + readback/map wait
   - `cpu_postprocess_ms`: CPU-side score aggregation
   - `other_ms`: uncategorized overhead
+- `gpu_timestamp_ms` is the independent GPU execution duration measured with WebGPU
+  Timestamp Query. It can overlap CPU wall-clock buckets and is not added to the MECE total.
 - When `--out <json>` is specified, finer-grained timing is in the `profiling` object:
-  - `create_shader_module_ms`, `create_pso_ms`, `create_buffer_ms`, `write_input_buffer_ms`, `create_pipeline_layout_ms`, `create_bind_group_ms`, `dispatch_and_submit_ms`, `readback_ms`, `post_process_ms`
+  - `create_shader_module_ms`, `create_pso_ms`, `create_buffer_ms`, `write_input_buffer_ms`, `create_pipeline_layout_ms`, `create_bind_group_ms`, `dispatch_and_submit_ms`, `readback_ms`, `gpu_submit_wait_ms`, `gpu_timestamp_ms`, `post_process_ms`
 - `dispatch_and_submit_ms` is CPU-side command encoding/submission cost, not pure WGSL kernel time.
 - `readback_ms` includes waiting for GPU work completion plus readback/map overhead.
 
