@@ -174,8 +174,10 @@ if(DSSIM_BUILD_DAWN_SAMPLE)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/src_gpu/$<CONFIG>"
     )
     set(DSSIM_GPU_STAGE0_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/stage0_absdiff.wgsl")
+    set(DSSIM_GPU_STAGE0_SCORE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/stage0_score.wgsl")
     set(DSSIM_GPU_DOWNSAMPLE_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/downsample_2x2.wgsl")
     set(DSSIM_GPU_LAB_PREPROCESS_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/lab_preprocess.wgsl")
+    set(DSSIM_GPU_RGBA8_TO_LINEAR_SHADER "${CMAKE_CURRENT_SOURCE_DIR}/src_gpu/shaders/rgba8_to_linear.wgsl")
 
     target_compile_features(dssim_webgpu PRIVATE cxx_std_20)
     target_include_directories(dssim_webgpu PRIVATE
@@ -228,15 +230,23 @@ if(DSSIM_BUILD_DAWN_SAMPLE)
             "${DSSIM_GPU_STAGE0_SHADER}"
             "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/stage0_absdiff.wgsl"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DSSIM_GPU_STAGE0_SCORE_SHADER}"
+            "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/stage0_score.wgsl"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_DOWNSAMPLE_SHADER}"
             "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/downsample_2x2.wgsl"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${DSSIM_GPU_LAB_PREPROCESS_SHADER}"
             "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/lab_preprocess.wgsl"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DSSIM_GPU_RGBA8_TO_LINEAR_SHADER}"
+            "$<TARGET_FILE_DIR:dssim_webgpu>/shaders/rgba8_to_linear.wgsl"
         DEPENDS
             "${DSSIM_GPU_STAGE0_SHADER}"
+            "${DSSIM_GPU_STAGE0_SCORE_SHADER}"
             "${DSSIM_GPU_DOWNSAMPLE_SHADER}"
             "${DSSIM_GPU_LAB_PREPROCESS_SHADER}"
+            "${DSSIM_GPU_RGBA8_TO_LINEAR_SHADER}"
         VERBATIM
     )
     add_dependencies(dssim_webgpu dssim_webgpu_shaders)

@@ -61,6 +61,7 @@ struct ComparisonRequest {
 struct ScaleOutputs {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::size_t elemCount = 0;
     std::vector<float> ssimMap;
     std::vector<float> mu1;
     std::vector<float> mu2;
@@ -164,6 +165,32 @@ struct Stage0Resources {
     wgpu::BindGroup stage0BindGroup;
 };
 
+struct BatchStage0Resources {
+    std::size_t rgba8CapacityBytes = 0;
+    std::size_t inputCapacityBytes = 0;
+    std::size_t downsampleCapacityBytes = 0;
+    std::size_t outputCapacityBytes = 0;
+    std::size_t baseCapacity = 0;
+    wgpu::Buffer rgba8Input1Buffer;
+    wgpu::Buffer rgba8Input2Buffer;
+    wgpu::Buffer input1Buffer;
+    wgpu::Buffer input2Buffer;
+    wgpu::Buffer downsample1Buffer;
+    wgpu::Buffer downsample2Buffer;
+    wgpu::Buffer lab1Buffer;
+    wgpu::Buffer lab2Buffer;
+    wgpu::Buffer outSsimBuffer;
+    wgpu::Buffer outMu1Buffer;
+    wgpu::Buffer outMu2Buffer;
+    wgpu::Buffer outVar1Buffer;
+    wgpu::Buffer outVar2Buffer;
+    wgpu::Buffer outCov12Buffer;
+    wgpu::Buffer readbackSsimBuffer;
+    wgpu::Buffer paramsBuffer;
+    wgpu::Buffer downsampleParamsBuffer;
+    wgpu::Buffer srgbToLinearLutBuffer;
+};
+
 struct GpuSession {
     wgpu::Instance instance;
     wgpu::Adapter adapter;
@@ -172,7 +199,13 @@ struct GpuSession {
 
     wgpu::ShaderModule preprocessShader;
     wgpu::ShaderModule stage0Shader;
+    wgpu::ShaderModule stage0ScoreShader;
     wgpu::ShaderModule downsampleShader;
+    wgpu::ShaderModule rgba8ToLinearShader;
+
+    wgpu::BindGroupLayout rgba8ToLinearBindGroupLayout;
+    wgpu::PipelineLayout rgba8ToLinearPipelineLayout;
+    wgpu::ComputePipeline rgba8ToLinearPipeline;
 
     wgpu::BindGroupLayout preprocessBindGroupLayout;
     wgpu::PipelineLayout preprocessPipelineLayout;
@@ -182,12 +215,17 @@ struct GpuSession {
     wgpu::PipelineLayout stage0PipelineLayout;
     wgpu::ComputePipeline stage0Pipeline;
 
+    wgpu::BindGroupLayout stage0ScoreBindGroupLayout;
+    wgpu::PipelineLayout stage0ScorePipelineLayout;
+    wgpu::ComputePipeline stage0ScorePipeline;
+
     wgpu::BindGroupLayout downsampleBindGroupLayout;
     wgpu::PipelineLayout downsamplePipelineLayout;
     wgpu::ComputePipeline downsamplePipeline;
 
     std::unique_ptr<Stage0Resources> stage0Resources;
     std::unique_ptr<Stage0Resources> debugStage0Resources;
+    std::unique_ptr<BatchStage0Resources> batchStage0Resources;
 
     ProfilingSummary initProfiling;
 };
@@ -421,6 +459,17 @@ void ParallelFor(
     }
 }
 
+const std::array<float, 256>& SrgbToLinearLut() {
+    static const std::array<float, 256> lut = [] {
+        std::array<float, 256> table{};
+        for (std::size_t i = 0; i < table.size(); ++i) {
+            table[i] = SrgbToLinear(static_cast<float>(i) / 255.0f);
+        }
+        return table;
+    }();
+    return lut;
+}
+
 std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>& bytes) {
     if ((bytes.size() % 4) != 0) {
         throw std::runtime_error("rgba8 byte count is not divisible by 4");
@@ -428,13 +477,7 @@ std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>&
 
     const std::size_t pixelCount = bytes.size() / 4;
     std::vector<LinearRgba> out(pixelCount);
-    static const std::array<float, 256> srgbToLinearLut = [] {
-        std::array<float, 256> lut{};
-        for (std::size_t i = 0; i < lut.size(); ++i) {
-            lut[i] = SrgbToLinear(static_cast<float>(i) / 255.0f);
-        }
-        return lut;
-    }();
+    const auto& srgbToLinearLut = SrgbToLinearLut();
     ParallelFor(pixelCount, [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
             const std::size_t base = i * 4;
@@ -604,7 +647,7 @@ std::string BuildJson(
         os << "        \"window_size\": " << kStage0WindowSize << ",\n";
         os << "        \"window_type\": \"gaussian_blur_kernel_x2\",\n";
         os << "        \"weight\": " << std::setprecision(17) << kDefaultScaleWeights[i] << ",\n";
-        os << "        \"elem_count\": " << scale.ssimMap.size() << ",\n";
+        os << "        \"elem_count\": " << scale.elemCount << ",\n";
         os << "        \"mean_ssim_f64\": " << std::setprecision(17) << scale.meanSsim << ",\n";
         os << "        \"ssim_score_f64\": " << std::setprecision(17) << scale.ssimScore << "\n";
         os << "      }";
@@ -743,7 +786,7 @@ wgpu::ShaderModule CreateShaderModule(const wgpu::Device& device, const std::str
     return device.CreateShaderModule(&shaderDesc);
 }
 
-std::vector<std::uint8_t> ReadBufferBlocking(
+void MapBufferBlocking(
     const wgpu::Instance& instance,
     wgpu::Buffer& buffer,
     std::size_t byteSize) {
@@ -778,7 +821,13 @@ std::vector<std::uint8_t> ReadBufferBlocking(
         }
         throw std::runtime_error(message);
     }
+}
 
+std::vector<std::uint8_t> ReadBufferBlocking(
+    const wgpu::Instance& instance,
+    wgpu::Buffer& buffer,
+    std::size_t byteSize) {
+    MapBufferBlocking(instance, buffer, byteSize);
     const void* mapped = buffer.GetConstMappedRange(0, static_cast<std::uint64_t>(byteSize));
     if (mapped == nullptr) {
         throw std::runtime_error("GetConstMappedRange returned null");
@@ -790,6 +839,49 @@ std::vector<std::uint8_t> ReadBufferBlocking(
     }
     buffer.Unmap();
     return data;
+}
+
+double SumF32(const float* values, std::size_t valueCount) {
+    std::array<double, 8> sums{};
+    std::size_t i = 0;
+    for (; i + sums.size() <= valueCount; i += sums.size()) {
+        sums[0] += static_cast<double>(values[i + 0]);
+        sums[1] += static_cast<double>(values[i + 1]);
+        sums[2] += static_cast<double>(values[i + 2]);
+        sums[3] += static_cast<double>(values[i + 3]);
+        sums[4] += static_cast<double>(values[i + 4]);
+        sums[5] += static_cast<double>(values[i + 5]);
+        sums[6] += static_cast<double>(values[i + 6]);
+        sums[7] += static_cast<double>(values[i + 7]);
+    }
+    double sum = std::accumulate(sums.begin(), sums.end(), 0.0);
+    for (; i < valueCount; ++i) {
+        sum += static_cast<double>(values[i]);
+    }
+    return sum;
+}
+
+double SumAbsoluteDeviation(
+    const float* values,
+    std::size_t valueCount,
+    double average) {
+    std::array<double, 8> sums{};
+    std::size_t i = 0;
+    for (; i + sums.size() <= valueCount; i += sums.size()) {
+        sums[0] += std::abs(average - static_cast<double>(values[i + 0]));
+        sums[1] += std::abs(average - static_cast<double>(values[i + 1]));
+        sums[2] += std::abs(average - static_cast<double>(values[i + 2]));
+        sums[3] += std::abs(average - static_cast<double>(values[i + 3]));
+        sums[4] += std::abs(average - static_cast<double>(values[i + 4]));
+        sums[5] += std::abs(average - static_cast<double>(values[i + 5]));
+        sums[6] += std::abs(average - static_cast<double>(values[i + 6]));
+        sums[7] += std::abs(average - static_cast<double>(values[i + 7]));
+    }
+    double sum = std::accumulate(sums.begin(), sums.end(), 0.0);
+    for (; i < valueCount; ++i) {
+        sum += std::abs(average - static_cast<double>(values[i]));
+    }
+    return sum;
 }
 
 ScaleOutputs RunStage0Compute(
@@ -1055,6 +1147,7 @@ ScaleOutputs RunStage0Compute(
     
     outputs.width = width;
     outputs.height = height;
+    outputs.elemCount = elemCount;
     const auto start_Readback = std::chrono::steady_clock::now();
     const auto ssimBytes =
         ReadBufferBlocking(session.instance, resources.readbackSsimBuffer, f32Bytes);
@@ -1087,20 +1180,468 @@ ScaleOutputs RunStage0Compute(
 
     const auto start_PostProcess = std::chrono::steady_clock::now();
     // Aggregate f32 SSIM values in f64, matching the reference implementation.
-    double ssimSum = 0.0;
-    for (float s : outputs.ssimMap) {
-        ssimSum += static_cast<double>(s);
-    }
+    const double ssimSum = SumF32(outputs.ssimMap.data(), elemCount);
     outputs.meanSsim = ssimSum / static_cast<double>(elemCount);
     const double avg =
         std::pow(std::max(outputs.meanSsim, 0.0), std::pow(0.5, static_cast<double>(scaleLevel)));
-    double devSum = 0.0;
-    for (float s : outputs.ssimMap) {
-        devSum += std::abs(avg - static_cast<double>(s));
-    }
+    const double devSum =
+        SumAbsoluteDeviation(outputs.ssimMap.data(), elemCount, avg);
     outputs.ssimScore = 1.0 - (devSum / static_cast<double>(elemCount));
     const auto finish_PostProcess = std::chrono::steady_clock::now();
     outputs.postProcess_time = std::chrono::duration_cast<std::chrono::milliseconds>(finish_PostProcess - start_PostProcess);
+    return outputs;
+}
+
+std::vector<ScaleOutputs> RunStage0BatchCompute(
+    GpuSession& session,
+    const std::vector<std::uint8_t>& input1,
+    const std::vector<std::uint8_t>& input2,
+    const std::vector<std::uint32_t>& widths,
+    const std::vector<std::uint32_t>& heights) {
+    const std::size_t levelCount = widths.size();
+    if (levelCount == 0 || heights.size() != levelCount) {
+        throw std::runtime_error("invalid batch dimensions");
+    }
+
+    constexpr std::size_t kBindingAlignment = 256u;
+    const auto alignUp = [](std::size_t value) {
+        return (value + kBindingAlignment - 1u) & ~(kBindingAlignment - 1u);
+    };
+
+    std::vector<std::size_t> outputOffsets(levelCount);
+    std::vector<std::size_t> elemCounts(levelCount);
+    std::size_t outputBytesTotal = 0;
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        const std::size_t elemCount =
+            static_cast<std::size_t>(widths[level]) * static_cast<std::size_t>(heights[level]);
+        elemCounts[level] = elemCount;
+        outputOffsets[level] = outputBytesTotal;
+        outputBytesTotal += alignUp(elemCount * sizeof(float));
+    }
+
+    const std::size_t baseElemCount = elemCounts.front();
+    const std::size_t rgba8Bytes = baseElemCount * 4u;
+    if (input1.size() != rgba8Bytes || input2.size() != rgba8Bytes) {
+        throw std::runtime_error("batch input dimensions do not match pixel count");
+    }
+    const std::size_t inputBytes = baseElemCount * sizeof(LinearRgba);
+    const std::size_t downsampleBytes =
+        ((levelCount > 1u) ? elemCounts[1] : 1u) * sizeof(LinearRgba);
+    const std::size_t baseLabBytes = baseElemCount * sizeof(float) * 4u;
+    const std::size_t baseF32Bytes = baseElemCount * sizeof(float);
+    const std::size_t paramsBytes = levelCount * kBindingAlignment;
+
+    std::vector<ScaleOutputs> outputs(levelCount);
+    if (!session.batchStage0Resources ||
+        session.batchStage0Resources->rgba8CapacityBytes < rgba8Bytes ||
+        session.batchStage0Resources->inputCapacityBytes < inputBytes ||
+        session.batchStage0Resources->downsampleCapacityBytes < downsampleBytes ||
+        session.batchStage0Resources->outputCapacityBytes < outputBytesTotal ||
+        session.batchStage0Resources->baseCapacity < baseElemCount) {
+        auto resources = std::make_unique<BatchStage0Resources>();
+        resources->rgba8CapacityBytes = rgba8Bytes;
+        resources->inputCapacityBytes = inputBytes;
+        resources->downsampleCapacityBytes = downsampleBytes;
+        resources->outputCapacityBytes = outputBytesTotal;
+        resources->baseCapacity = baseElemCount;
+
+        const auto startCreateBuffers = std::chrono::steady_clock::now();
+        wgpu::BufferDescriptor rgba8Desc = {};
+        rgba8Desc.size = static_cast<std::uint64_t>(rgba8Bytes);
+        rgba8Desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        resources->rgba8Input1Buffer = session.device.CreateBuffer(&rgba8Desc);
+        resources->rgba8Input2Buffer = session.device.CreateBuffer(&rgba8Desc);
+
+        wgpu::BufferDescriptor inputDesc = {};
+        inputDesc.size = static_cast<std::uint64_t>(inputBytes);
+        inputDesc.usage = wgpu::BufferUsage::Storage;
+        resources->input1Buffer = session.device.CreateBuffer(&inputDesc);
+        resources->input2Buffer = session.device.CreateBuffer(&inputDesc);
+
+        wgpu::BufferDescriptor downsampleDesc = {};
+        downsampleDesc.size = static_cast<std::uint64_t>(downsampleBytes);
+        downsampleDesc.usage = wgpu::BufferUsage::Storage;
+        resources->downsample1Buffer = session.device.CreateBuffer(&downsampleDesc);
+        resources->downsample2Buffer = session.device.CreateBuffer(&downsampleDesc);
+
+        wgpu::BufferDescriptor labDesc = {};
+        labDesc.size = static_cast<std::uint64_t>(baseLabBytes);
+        labDesc.usage = wgpu::BufferUsage::Storage;
+        resources->lab1Buffer = session.device.CreateBuffer(&labDesc);
+        resources->lab2Buffer = session.device.CreateBuffer(&labDesc);
+
+        wgpu::BufferDescriptor ssimDesc = {};
+        ssimDesc.size = static_cast<std::uint64_t>(baseF32Bytes);
+        ssimDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+        resources->outSsimBuffer = session.device.CreateBuffer(&ssimDesc);
+
+        wgpu::BufferDescriptor statsDesc = ssimDesc;
+        statsDesc.size = sizeof(float);
+        resources->outMu1Buffer = session.device.CreateBuffer(&statsDesc);
+        resources->outMu2Buffer = session.device.CreateBuffer(&statsDesc);
+        resources->outVar1Buffer = session.device.CreateBuffer(&statsDesc);
+        resources->outVar2Buffer = session.device.CreateBuffer(&statsDesc);
+        resources->outCov12Buffer = session.device.CreateBuffer(&statsDesc);
+
+        wgpu::BufferDescriptor readbackDesc = {};
+        readbackDesc.size = static_cast<std::uint64_t>(outputBytesTotal);
+        readbackDesc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+        resources->readbackSsimBuffer = session.device.CreateBuffer(&readbackDesc);
+
+        wgpu::BufferDescriptor paramsDesc = {};
+        paramsDesc.size = static_cast<std::uint64_t>(paramsBytes);
+        paramsDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+        resources->paramsBuffer = session.device.CreateBuffer(&paramsDesc);
+        resources->downsampleParamsBuffer = session.device.CreateBuffer(&paramsDesc);
+
+        wgpu::BufferDescriptor lutDesc = {};
+        lutDesc.size = 256u * sizeof(float);
+        lutDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+        resources->srgbToLinearLutBuffer = session.device.CreateBuffer(&lutDesc);
+
+        if (!resources->rgba8Input1Buffer || !resources->rgba8Input2Buffer ||
+            !resources->input1Buffer || !resources->input2Buffer ||
+            !resources->downsample1Buffer || !resources->downsample2Buffer ||
+            !resources->lab1Buffer || !resources->lab2Buffer ||
+            !resources->outSsimBuffer || !resources->outMu1Buffer ||
+            !resources->outMu2Buffer || !resources->outVar1Buffer ||
+            !resources->outVar2Buffer || !resources->outCov12Buffer ||
+            !resources->readbackSsimBuffer || !resources->paramsBuffer ||
+            !resources->downsampleParamsBuffer ||
+            !resources->srgbToLinearLutBuffer) {
+            throw std::runtime_error("failed to create batch stage0 buffers");
+        }
+        const auto finishCreateBuffers = std::chrono::steady_clock::now();
+        outputs.front().createBuffers_time =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                finishCreateBuffers - startCreateBuffers);
+        session.batchStage0Resources = std::move(resources);
+    }
+
+    BatchStage0Resources& resources = *session.batchStage0Resources;
+    std::vector<wgpu::BindGroup> preprocessBindGroups1(levelCount);
+    std::vector<wgpu::BindGroup> preprocessBindGroups2(levelCount);
+    std::vector<wgpu::BindGroup> stage0BindGroups(levelCount);
+    std::vector<wgpu::BindGroup> downsampleBindGroups1(levelCount - 1u);
+    std::vector<wgpu::BindGroup> downsampleBindGroups2(levelCount - 1u);
+
+    const auto startCreateBindGroups = std::chrono::steady_clock::now();
+    wgpu::BindGroupEntry convertEntries1[4] = {};
+    convertEntries1[0].binding = 0;
+    convertEntries1[0].buffer = resources.rgba8Input1Buffer;
+    convertEntries1[0].size = static_cast<std::uint64_t>(rgba8Bytes);
+    convertEntries1[1].binding = 1;
+    convertEntries1[1].buffer = resources.input1Buffer;
+    convertEntries1[1].size = static_cast<std::uint64_t>(inputBytes);
+    convertEntries1[2].binding = 2;
+    convertEntries1[2].buffer = resources.srgbToLinearLutBuffer;
+    convertEntries1[2].size = 256u * sizeof(float);
+    convertEntries1[3].binding = 3;
+    convertEntries1[3].buffer = resources.paramsBuffer;
+    convertEntries1[3].size = 4u * sizeof(std::uint32_t);
+    wgpu::BindGroupDescriptor convertDesc1 = {};
+    convertDesc1.layout = session.rgba8ToLinearBindGroupLayout;
+    convertDesc1.entryCount = 4;
+    convertDesc1.entries = convertEntries1;
+    wgpu::BindGroup convertBindGroup1 =
+        session.device.CreateBindGroup(&convertDesc1);
+
+    wgpu::BindGroupEntry convertEntries2[4] = {};
+    std::copy(
+        std::begin(convertEntries1),
+        std::end(convertEntries1),
+        std::begin(convertEntries2));
+    convertEntries2[0].buffer = resources.rgba8Input2Buffer;
+    convertEntries2[1].buffer = resources.input2Buffer;
+    wgpu::BindGroupDescriptor convertDesc2 = convertDesc1;
+    convertDesc2.entries = convertEntries2;
+    wgpu::BindGroup convertBindGroup2 =
+        session.device.CreateBindGroup(&convertDesc2);
+    if (!convertBindGroup1 || !convertBindGroup2) {
+        throw std::runtime_error("failed to create rgba8 conversion bind groups");
+    }
+
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        const std::uint64_t rgbaBytes =
+            static_cast<std::uint64_t>(elemCounts[level] * sizeof(LinearRgba));
+        const std::uint64_t f32Bytes =
+            static_cast<std::uint64_t>(elemCounts[level] * sizeof(float));
+        const std::uint64_t paramsOffset =
+            static_cast<std::uint64_t>(level * kBindingAlignment);
+        const wgpu::Buffer& currentInput1 =
+            ((level & 1u) == 0u) ? resources.input1Buffer : resources.downsample1Buffer;
+        const wgpu::Buffer& currentInput2 =
+            ((level & 1u) == 0u) ? resources.input2Buffer : resources.downsample2Buffer;
+
+        wgpu::BindGroupEntry preprocessEntries1[3] = {};
+        preprocessEntries1[0].binding = 0;
+        preprocessEntries1[0].buffer = currentInput1;
+        preprocessEntries1[0].size = rgbaBytes;
+        preprocessEntries1[1].binding = 1;
+        preprocessEntries1[1].buffer = resources.lab1Buffer;
+        preprocessEntries1[1].size = rgbaBytes;
+        preprocessEntries1[2].binding = 2;
+        preprocessEntries1[2].buffer = resources.paramsBuffer;
+        preprocessEntries1[2].offset = paramsOffset;
+        preprocessEntries1[2].size = 4u * sizeof(std::uint32_t);
+
+        wgpu::BindGroupDescriptor preprocessDesc1 = {};
+        preprocessDesc1.layout = session.preprocessBindGroupLayout;
+        preprocessDesc1.entryCount = 3;
+        preprocessDesc1.entries = preprocessEntries1;
+        preprocessBindGroups1[level] = session.device.CreateBindGroup(&preprocessDesc1);
+
+        wgpu::BindGroupEntry preprocessEntries2[3] = {};
+        std::copy(
+            std::begin(preprocessEntries1),
+            std::end(preprocessEntries1),
+            std::begin(preprocessEntries2));
+        preprocessEntries2[0].buffer = currentInput2;
+        preprocessEntries2[1].buffer = resources.lab2Buffer;
+        wgpu::BindGroupDescriptor preprocessDesc2 = preprocessDesc1;
+        preprocessDesc2.entries = preprocessEntries2;
+        preprocessBindGroups2[level] = session.device.CreateBindGroup(&preprocessDesc2);
+
+        wgpu::BindGroupEntry stageEntries[4] = {};
+        stageEntries[0].binding = 0;
+        stageEntries[0].buffer = resources.lab1Buffer;
+        stageEntries[0].size = rgbaBytes;
+        stageEntries[1].binding = 1;
+        stageEntries[1].buffer = resources.lab2Buffer;
+        stageEntries[1].size = rgbaBytes;
+        stageEntries[2].binding = 2;
+        stageEntries[2].buffer = resources.outSsimBuffer;
+        stageEntries[2].size = f32Bytes;
+        stageEntries[3].binding = 3;
+        stageEntries[3].buffer = resources.paramsBuffer;
+        stageEntries[3].offset = paramsOffset;
+        stageEntries[3].size = 4u * sizeof(std::uint32_t);
+
+        wgpu::BindGroupDescriptor stageDesc = {};
+        stageDesc.layout = session.stage0ScoreBindGroupLayout;
+        stageDesc.entryCount = 4;
+        stageDesc.entries = stageEntries;
+        stage0BindGroups[level] = session.device.CreateBindGroup(&stageDesc);
+
+        if (!preprocessBindGroups1[level] || !preprocessBindGroups2[level] ||
+            !stage0BindGroups[level]) {
+            throw std::runtime_error("failed to create batch stage0 bind groups");
+        }
+
+        if (level + 1u < levelCount) {
+            const std::uint64_t nextRgbaBytes = static_cast<std::uint64_t>(
+                elemCounts[level + 1u] * sizeof(LinearRgba));
+            const wgpu::Buffer& nextInput1 =
+                ((level & 1u) == 0u) ? resources.downsample1Buffer : resources.input1Buffer;
+            const wgpu::Buffer& nextInput2 =
+                ((level & 1u) == 0u) ? resources.downsample2Buffer : resources.input2Buffer;
+
+            wgpu::BindGroupEntry downsampleEntries1[3] = {};
+            downsampleEntries1[0].binding = 0;
+            downsampleEntries1[0].buffer = currentInput1;
+            downsampleEntries1[0].size = rgbaBytes;
+            downsampleEntries1[1].binding = 1;
+            downsampleEntries1[1].buffer = nextInput1;
+            downsampleEntries1[1].size = nextRgbaBytes;
+            downsampleEntries1[2].binding = 2;
+            downsampleEntries1[2].buffer = resources.downsampleParamsBuffer;
+            downsampleEntries1[2].offset = paramsOffset;
+            downsampleEntries1[2].size = 4u * sizeof(std::uint32_t);
+
+            wgpu::BindGroupDescriptor downsampleDesc1 = {};
+            downsampleDesc1.layout = session.downsampleBindGroupLayout;
+            downsampleDesc1.entryCount = 3;
+            downsampleDesc1.entries = downsampleEntries1;
+            downsampleBindGroups1[level] =
+                session.device.CreateBindGroup(&downsampleDesc1);
+
+            wgpu::BindGroupEntry downsampleEntries2[3] = {};
+            std::copy(
+                std::begin(downsampleEntries1),
+                std::end(downsampleEntries1),
+                std::begin(downsampleEntries2));
+            downsampleEntries2[0].buffer = currentInput2;
+            downsampleEntries2[1].buffer = nextInput2;
+            wgpu::BindGroupDescriptor downsampleDesc2 = downsampleDesc1;
+            downsampleDesc2.entries = downsampleEntries2;
+            downsampleBindGroups2[level] =
+                session.device.CreateBindGroup(&downsampleDesc2);
+
+            if (!downsampleBindGroups1[level] || !downsampleBindGroups2[level]) {
+                throw std::runtime_error("failed to create batch downsample bind groups");
+            }
+        }
+    }
+    const auto finishCreateBindGroups = std::chrono::steady_clock::now();
+    outputs.front().createBindGroups_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            finishCreateBindGroups - startCreateBindGroups);
+
+    struct ParamsData {
+        std::uint32_t len;
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t qscale;
+    };
+    struct DownsampleParamsData {
+        std::uint32_t inWidth;
+        std::uint32_t inHeight;
+        std::uint32_t outWidth;
+        std::uint32_t outHeight;
+    };
+
+    wgpu::Queue queue = session.device.GetQueue();
+    const auto startWriteBuffers = std::chrono::steady_clock::now();
+    queue.WriteBuffer(resources.rgba8Input1Buffer, 0, input1.data(), rgba8Bytes);
+    queue.WriteBuffer(resources.rgba8Input2Buffer, 0, input2.data(), rgba8Bytes);
+    const auto& srgbToLinearLut = SrgbToLinearLut();
+    queue.WriteBuffer(
+        resources.srgbToLinearLutBuffer,
+        0,
+        srgbToLinearLut.data(),
+        srgbToLinearLut.size() * sizeof(float));
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        const ParamsData params = {
+            .len = static_cast<std::uint32_t>(elemCounts[level]),
+            .width = widths[level],
+            .height = heights[level],
+            .qscale = kStage0QScale,
+        };
+        queue.WriteBuffer(
+            resources.paramsBuffer,
+            static_cast<std::uint64_t>(level * kBindingAlignment),
+            &params,
+            sizeof(params));
+        if (level + 1u < levelCount) {
+            const DownsampleParamsData downsampleParams = {
+                .inWidth = widths[level],
+                .inHeight = heights[level],
+                .outWidth = widths[level + 1u],
+                .outHeight = heights[level + 1u],
+            };
+            queue.WriteBuffer(
+                resources.downsampleParamsBuffer,
+                static_cast<std::uint64_t>(level * kBindingAlignment),
+                &downsampleParams,
+                sizeof(downsampleParams));
+        }
+    }
+    const auto finishWriteBuffers = std::chrono::steady_clock::now();
+    outputs.front().writeInputBuffers_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            finishWriteBuffers - startWriteBuffers);
+
+    const auto startDispatch = std::chrono::steady_clock::now();
+    wgpu::CommandEncoder encoder = session.device.CreateCommandEncoder();
+    {
+        const std::uint32_t wgX = (widths.front() + 15u) / 16u;
+        const std::uint32_t wgY = (heights.front() + 15u) / 16u;
+        wgpu::ComputePassDescriptor passDesc = {};
+        wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
+        pass.SetPipeline(session.rgba8ToLinearPipeline);
+        pass.SetBindGroup(0, convertBindGroup1);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
+        pass.SetBindGroup(0, convertBindGroup2);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
+        pass.End();
+    }
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        const std::uint32_t wgX = (widths[level] + 15u) / 16u;
+        const std::uint32_t wgY = (heights[level] + 15u) / 16u;
+        wgpu::ComputePassDescriptor passDesc = {};
+        wgpu::ComputePassEncoder pass = encoder.BeginComputePass(&passDesc);
+        pass.SetPipeline(session.preprocessPipeline);
+        pass.SetBindGroup(0, preprocessBindGroups1[level]);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
+        pass.SetBindGroup(0, preprocessBindGroups2[level]);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
+        pass.SetPipeline(session.stage0ScorePipeline);
+        pass.SetBindGroup(0, stage0BindGroups[level]);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
+        pass.End();
+
+        encoder.CopyBufferToBuffer(
+            resources.outSsimBuffer,
+            0,
+            resources.readbackSsimBuffer,
+            static_cast<std::uint64_t>(outputOffsets[level]),
+            static_cast<std::uint64_t>(elemCounts[level] * sizeof(float)));
+
+        if (level + 1u < levelCount) {
+            const std::uint32_t downsampleWgX = (widths[level + 1u] + 15u) / 16u;
+            const std::uint32_t downsampleWgY = (heights[level + 1u] + 15u) / 16u;
+            wgpu::ComputePassDescriptor downsamplePassDesc = {};
+            wgpu::ComputePassEncoder downsamplePass =
+                encoder.BeginComputePass(&downsamplePassDesc);
+            downsamplePass.SetPipeline(session.downsamplePipeline);
+            downsamplePass.SetBindGroup(0, downsampleBindGroups1[level]);
+            downsamplePass.DispatchWorkgroups(downsampleWgX, downsampleWgY, 1);
+            downsamplePass.SetBindGroup(0, downsampleBindGroups2[level]);
+            downsamplePass.DispatchWorkgroups(downsampleWgX, downsampleWgY, 1);
+            downsamplePass.End();
+        }
+    }
+    wgpu::CommandBuffer commandBuffer = encoder.Finish();
+    queue.Submit(1, &commandBuffer);
+    const auto finishDispatch = std::chrono::steady_clock::now();
+    outputs.front().dispatchAndSubmit_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            finishDispatch - startDispatch);
+
+    const auto startReadback = std::chrono::steady_clock::now();
+    MapBufferBlocking(
+        session.instance,
+        resources.readbackSsimBuffer,
+        outputBytesTotal);
+    const auto* ssimBytes = static_cast<const std::uint8_t*>(
+        resources.readbackSsimBuffer.GetConstMappedRange(
+            0,
+            static_cast<std::uint64_t>(outputBytesTotal)));
+    if (ssimBytes == nullptr) {
+        resources.readbackSsimBuffer.Unmap();
+        throw std::runtime_error("GetConstMappedRange returned null");
+    }
+    const auto finishReadback = std::chrono::steady_clock::now();
+    outputs.front().readback_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            finishReadback - startReadback);
+
+    const auto startPostProcess = std::chrono::steady_clock::now();
+    const auto processLevel = [&](std::size_t level) {
+        ScaleOutputs& output = outputs[level];
+        output.width = widths[level];
+        output.height = heights[level];
+        output.elemCount = elemCounts[level];
+        const float* ssimValues = reinterpret_cast<const float*>(
+            ssimBytes + outputOffsets[level]);
+
+        const double ssimSum = SumF32(ssimValues, elemCounts[level]);
+        output.meanSsim = ssimSum / static_cast<double>(elemCounts[level]);
+        const double avg = std::pow(
+            std::max(output.meanSsim, 0.0),
+            std::pow(0.5, static_cast<double>(level)));
+        const double devSum =
+            SumAbsoluteDeviation(ssimValues, elemCounts[level], avg);
+        output.ssimScore = 1.0 - (devSum / static_cast<double>(elemCounts[level]));
+    };
+    if (levelCount > 1u && baseElemCount >= 65536u) {
+        auto remainingLevels = std::async(std::launch::async, [&] {
+            for (std::size_t level = 1; level < levelCount; ++level) {
+                processLevel(level);
+            }
+        });
+        processLevel(0);
+        remainingLevels.get();
+    } else {
+        for (std::size_t level = 0; level < levelCount; ++level) {
+            processLevel(level);
+        }
+    }
+    resources.readbackSsimBuffer.Unmap();
+    const auto finishPostProcess = std::chrono::steady_clock::now();
+    outputs.front().postProcess_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            finishPostProcess - startPostProcess);
     return outputs;
 }
 
@@ -1349,7 +1890,11 @@ wgpu::Device RequestDeviceBlocking(const wgpu::Instance& instance, const wgpu::A
 
 GpuSession CreateGpuSession(
     const std::string& labPreprocessShaderSource,
-    const std::string& stage0ShaderSource) {
+    const std::string& stage0ShaderSource,
+    const std::string& stage0ScoreShaderSource,
+    const std::string& downsampleShaderSource,
+    const std::string& rgba8ToLinearShaderSource,
+    bool enableDebugPipeline) {
     GpuSession session;
 
     dawnProcSetProcs(&dawn::native::GetProcs());
@@ -1375,11 +1920,22 @@ GpuSession CreateGpuSession(
 
     const auto startCreateShaderModule = std::chrono::steady_clock::now();
     session.preprocessShader = CreateShaderModule(session.device, labPreprocessShaderSource);
-    session.stage0Shader = CreateShaderModule(session.device, stage0ShaderSource);
+    if (enableDebugPipeline) {
+        session.stage0Shader = CreateShaderModule(session.device, stage0ShaderSource);
+    } else {
+        session.stage0ScoreShader =
+            CreateShaderModule(session.device, stage0ScoreShaderSource);
+    }
+    session.downsampleShader = CreateShaderModule(session.device, downsampleShaderSource);
+    session.rgba8ToLinearShader =
+        CreateShaderModule(session.device, rgba8ToLinearShaderSource);
     const auto finishCreateShaderModule = std::chrono::steady_clock::now();
     session.initProfiling.createShaderModuleTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(finishCreateShaderModule - startCreateShaderModule);
-    if (!session.preprocessShader || !session.stage0Shader) {
+    if (!session.preprocessShader ||
+        (enableDebugPipeline ? !session.stage0Shader : !session.stage0ScoreShader) ||
+        !session.downsampleShader ||
+        !session.rgba8ToLinearShader) {
         throw std::runtime_error("failed to create reusable shader modules");
     }
 
@@ -1390,6 +1946,33 @@ GpuSession CreateGpuSession(
         std::uint32_t qscale;
     };
     const auto startCreatePipelineLayouts = std::chrono::steady_clock::now();
+
+    wgpu::BindGroupLayoutEntry rgba8ToLinearLayoutEntries[4] = {};
+    rgba8ToLinearLayoutEntries[0].binding = 0;
+    rgba8ToLinearLayoutEntries[0].visibility = wgpu::ShaderStage::Compute;
+    rgba8ToLinearLayoutEntries[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+    rgba8ToLinearLayoutEntries[1].binding = 1;
+    rgba8ToLinearLayoutEntries[1].visibility = wgpu::ShaderStage::Compute;
+    rgba8ToLinearLayoutEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
+    rgba8ToLinearLayoutEntries[2].binding = 2;
+    rgba8ToLinearLayoutEntries[2].visibility = wgpu::ShaderStage::Compute;
+    rgba8ToLinearLayoutEntries[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+    rgba8ToLinearLayoutEntries[2].buffer.minBindingSize = 256u * sizeof(float);
+    rgba8ToLinearLayoutEntries[3].binding = 3;
+    rgba8ToLinearLayoutEntries[3].visibility = wgpu::ShaderStage::Compute;
+    rgba8ToLinearLayoutEntries[3].buffer.type = wgpu::BufferBindingType::Uniform;
+    rgba8ToLinearLayoutEntries[3].buffer.minBindingSize = sizeof(Stage0ParamsData);
+    wgpu::BindGroupLayoutDescriptor rgba8ToLinearBglDesc = {};
+    rgba8ToLinearBglDesc.entryCount = 4;
+    rgba8ToLinearBglDesc.entries = rgba8ToLinearLayoutEntries;
+    session.rgba8ToLinearBindGroupLayout =
+        session.device.CreateBindGroupLayout(&rgba8ToLinearBglDesc);
+
+    wgpu::PipelineLayoutDescriptor rgba8ToLinearPlDesc = {};
+    rgba8ToLinearPlDesc.bindGroupLayoutCount = 1;
+    rgba8ToLinearPlDesc.bindGroupLayouts = &session.rgba8ToLinearBindGroupLayout;
+    session.rgba8ToLinearPipelineLayout =
+        session.device.CreatePipelineLayout(&rgba8ToLinearPlDesc);
 
     wgpu::BindGroupLayoutEntry preprocessLayoutEntries[3] = {};
     preprocessLayoutEntries[0].binding = 0;
@@ -1434,6 +2017,53 @@ GpuSession CreateGpuSession(
     stage0PlDesc.bindGroupLayouts = &session.stage0BindGroupLayout;
     session.stage0PipelineLayout = session.device.CreatePipelineLayout(&stage0PlDesc);
 
+    wgpu::BindGroupLayoutEntry stage0ScoreLayoutEntries[4] = {};
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        stage0ScoreLayoutEntries[i].binding = i;
+        stage0ScoreLayoutEntries[i].visibility = wgpu::ShaderStage::Compute;
+        stage0ScoreLayoutEntries[i].buffer.type =
+            (i <= 1u) ? wgpu::BufferBindingType::ReadOnlyStorage
+                      : wgpu::BufferBindingType::Storage;
+    }
+    stage0ScoreLayoutEntries[3].binding = 3;
+    stage0ScoreLayoutEntries[3].visibility = wgpu::ShaderStage::Compute;
+    stage0ScoreLayoutEntries[3].buffer.type = wgpu::BufferBindingType::Uniform;
+    stage0ScoreLayoutEntries[3].buffer.minBindingSize = sizeof(Stage0ParamsData);
+    wgpu::BindGroupLayoutDescriptor stage0ScoreBglDesc = {};
+    stage0ScoreBglDesc.entryCount = 4;
+    stage0ScoreBglDesc.entries = stage0ScoreLayoutEntries;
+    session.stage0ScoreBindGroupLayout =
+        session.device.CreateBindGroupLayout(&stage0ScoreBglDesc);
+
+    wgpu::PipelineLayoutDescriptor stage0ScorePlDesc = {};
+    stage0ScorePlDesc.bindGroupLayoutCount = 1;
+    stage0ScorePlDesc.bindGroupLayouts = &session.stage0ScoreBindGroupLayout;
+    session.stage0ScorePipelineLayout =
+        session.device.CreatePipelineLayout(&stage0ScorePlDesc);
+
+    wgpu::BindGroupLayoutEntry downsampleLayoutEntries[3] = {};
+    downsampleLayoutEntries[0].binding = 0;
+    downsampleLayoutEntries[0].visibility = wgpu::ShaderStage::Compute;
+    downsampleLayoutEntries[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+    downsampleLayoutEntries[1].binding = 1;
+    downsampleLayoutEntries[1].visibility = wgpu::ShaderStage::Compute;
+    downsampleLayoutEntries[1].buffer.type = wgpu::BufferBindingType::Storage;
+    downsampleLayoutEntries[2].binding = 2;
+    downsampleLayoutEntries[2].visibility = wgpu::ShaderStage::Compute;
+    downsampleLayoutEntries[2].buffer.type = wgpu::BufferBindingType::Uniform;
+    downsampleLayoutEntries[2].buffer.minBindingSize = 4u * sizeof(std::uint32_t);
+    wgpu::BindGroupLayoutDescriptor downsampleBglDesc = {};
+    downsampleBglDesc.entryCount = 3;
+    downsampleBglDesc.entries = downsampleLayoutEntries;
+    session.downsampleBindGroupLayout =
+        session.device.CreateBindGroupLayout(&downsampleBglDesc);
+
+    wgpu::PipelineLayoutDescriptor downsamplePlDesc = {};
+    downsamplePlDesc.bindGroupLayoutCount = 1;
+    downsamplePlDesc.bindGroupLayouts = &session.downsampleBindGroupLayout;
+    session.downsamplePipelineLayout =
+        session.device.CreatePipelineLayout(&downsamplePlDesc);
+
     const auto finishCreatePipelineLayouts = std::chrono::steady_clock::now();
     session.initProfiling.createPipelineLayoutsTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(finishCreatePipelineLayouts - startCreatePipelineLayouts);
@@ -1445,17 +2075,47 @@ GpuSession CreateGpuSession(
     preprocessPipeDesc.compute.entryPoint = "main";
     session.preprocessPipeline = session.device.CreateComputePipeline(&preprocessPipeDesc);
 
-    wgpu::ComputePipelineDescriptor stage0PipeDesc = {};
-    stage0PipeDesc.layout = session.stage0PipelineLayout;
-    stage0PipeDesc.compute.module = session.stage0Shader;
-    stage0PipeDesc.compute.entryPoint = "main";
-    session.stage0Pipeline = session.device.CreateComputePipeline(&stage0PipeDesc);
+    if (enableDebugPipeline) {
+        wgpu::ComputePipelineDescriptor stage0PipeDesc = {};
+        stage0PipeDesc.layout = session.stage0PipelineLayout;
+        stage0PipeDesc.compute.module = session.stage0Shader;
+        stage0PipeDesc.compute.entryPoint = "main";
+        session.stage0Pipeline = session.device.CreateComputePipeline(&stage0PipeDesc);
+    } else {
+        wgpu::ComputePipelineDescriptor stage0ScorePipeDesc = {};
+        stage0ScorePipeDesc.layout = session.stage0ScorePipelineLayout;
+        stage0ScorePipeDesc.compute.module = session.stage0ScoreShader;
+        stage0ScorePipeDesc.compute.entryPoint = "main";
+        session.stage0ScorePipeline =
+            session.device.CreateComputePipeline(&stage0ScorePipeDesc);
+    }
+
+    wgpu::ComputePipelineDescriptor rgba8ToLinearPipeDesc = {};
+    rgba8ToLinearPipeDesc.layout = session.rgba8ToLinearPipelineLayout;
+    rgba8ToLinearPipeDesc.compute.module = session.rgba8ToLinearShader;
+    rgba8ToLinearPipeDesc.compute.entryPoint = "main";
+    session.rgba8ToLinearPipeline =
+        session.device.CreateComputePipeline(&rgba8ToLinearPipeDesc);
+
+    wgpu::ComputePipelineDescriptor downsamplePipeDesc = {};
+    downsamplePipeDesc.layout = session.downsamplePipelineLayout;
+    downsamplePipeDesc.compute.module = session.downsampleShader;
+    downsamplePipeDesc.compute.entryPoint = "main";
+    session.downsamplePipeline = session.device.CreateComputePipeline(&downsamplePipeDesc);
 
     const auto finishCreatePSO = std::chrono::high_resolution_clock::now();
     session.initProfiling.createPSOTime = duration_cast<milliseconds>(finishCreatePSO - startCreatePSO);
 
-    if (!session.preprocessBindGroupLayout || !session.preprocessPipelineLayout || !session.preprocessPipeline ||
-        !session.stage0BindGroupLayout || !session.stage0PipelineLayout || !session.stage0Pipeline) {
+    if (!session.rgba8ToLinearBindGroupLayout ||
+        !session.rgba8ToLinearPipelineLayout || !session.rgba8ToLinearPipeline ||
+        !session.preprocessBindGroupLayout || !session.preprocessPipelineLayout || !session.preprocessPipeline ||
+        (enableDebugPipeline
+             ? (!session.stage0BindGroupLayout || !session.stage0PipelineLayout ||
+                !session.stage0Pipeline)
+             : (!session.stage0ScoreBindGroupLayout || !session.stage0ScorePipelineLayout ||
+                !session.stage0ScorePipeline)) ||
+        !session.downsampleBindGroupLayout || !session.downsamplePipelineLayout ||
+        !session.downsamplePipeline) {
         throw std::runtime_error("failed to create reusable compute pipelines");
     }
 
@@ -1541,11 +2201,15 @@ void RunComparison(
         .byteCount = image2.pixels.size(),
     };
 
-    auto input1Future = std::async(
-        std::launch::async,
-        [&image1] { return ConvertRgba8ToLinearPlu(image1.pixels); });
-    auto input2 = ConvertRgba8ToLinearPlu(image2.pixels);
-    auto input1 = input1Future.get();
+    std::vector<LinearRgba> input1;
+    std::vector<LinearRgba> input2;
+    if (options.debugDumpEnabled) {
+        auto input1Future = std::async(
+            std::launch::async,
+            [&image1] { return ConvertRgba8ToLinearPlu(image1.pixels); });
+        input2 = ConvertRgba8ToLinearPlu(image2.pixels);
+        input1 = input1Future.get();
+    }
 
     // Identical input produces score 0 by definition (matches reference behavior).
     // GPU dispatches may introduce f32 non-determinism between separate runs,
@@ -1553,13 +2217,22 @@ void RunComparison(
     const bool identicalInput = (image1.pixels == image2.pixels);
 
     MultiScaleOutputs compute;
-    std::vector<LinearRgba> curr1 = std::move(input1);
-    std::vector<LinearRgba> curr2 = std::move(input2);
-    std::uint32_t currWidth = image1.width;
-    std::uint32_t currHeight = image1.height;
+    std::vector<std::vector<LinearRgba>> pyramid1;
+    std::vector<std::vector<LinearRgba>> pyramid2;
+    std::vector<std::uint32_t> pyramidWidths;
+    std::vector<std::uint32_t> pyramidHeights;
+    pyramidWidths.push_back(image1.width);
+    pyramidHeights.push_back(image1.height);
 
-    DownsampleOutputs firstDownsample1;
-    DownsampleOutputs firstDownsample2;
+    while (pyramidWidths.size() < kDefaultScaleWeights.size()) {
+        const std::uint32_t currWidth = pyramidWidths.back();
+        const std::uint32_t currHeight = pyramidHeights.back();
+        if (currWidth < 8u || currHeight < 8u) {
+            break;
+        }
+        pyramidWidths.push_back(currWidth / 2u);
+        pyramidHeights.push_back(currHeight / 2u);
+    }
 
     milliseconds createShaderModuleProcessingTime{0};
     milliseconds createPSOProcessingTime{0};
@@ -1570,10 +2243,49 @@ void RunComparison(
     milliseconds dispatchAndSubmitProcessingTime{0};
     milliseconds readbackProcessingTime{0};
     milliseconds postProcessProcessingTime{0};
-    for (std::size_t level = 0; level < kDefaultScaleWeights.size(); ++level) {
-        const bool readStats = options.debugDumpEnabled && level == 0;
-        ScaleOutputs scale =
-            RunStage0Compute(session, curr1, curr2, currWidth, currHeight, level, readStats);
+
+    if (options.debugDumpEnabled) {
+        pyramid1.push_back(std::move(input1));
+        pyramid2.push_back(std::move(input2));
+        for (std::size_t level = 1; level < pyramidWidths.size(); ++level) {
+            const std::uint32_t prevWidth = pyramidWidths[level - 1u];
+            const std::uint32_t prevHeight = pyramidHeights[level - 1u];
+            auto next1Future = std::async(
+                std::launch::async,
+                [&pyramid1, prevWidth, prevHeight] {
+                    return RunDownsample2x2Cpu(
+                        pyramid1.back(),
+                        prevWidth,
+                        prevHeight);
+                });
+            DownsampleOutputs next2 =
+                RunDownsample2x2Cpu(pyramid2.back(), prevWidth, prevHeight);
+            DownsampleOutputs next1 = next1Future.get();
+            pyramid1.push_back(std::move(next1.pixels));
+            pyramid2.push_back(std::move(next2.pixels));
+        }
+        for (std::size_t level = 0; level < pyramid1.size(); ++level) {
+            ScaleOutputs scale = RunStage0Compute(
+                session,
+                pyramid1[level],
+                pyramid2[level],
+                pyramidWidths[level],
+                pyramidHeights[level],
+                level,
+                level == 0);
+            compute.scales.push_back(std::move(scale));
+        }
+    } else {
+        compute.scales =
+            RunStage0BatchCompute(
+                session,
+                image1.pixels,
+                image2.pixels,
+                pyramidWidths,
+                pyramidHeights);
+    }
+
+    for (const ScaleOutputs& scale : compute.scales) {
         createShaderModuleProcessingTime += scale.createShaderModule_time;
         createPSOProcessingTime += scale.createPSO_time;
         createBuffersProcessingTime += scale.createBuffers_time;
@@ -1583,37 +2295,6 @@ void RunComparison(
         dispatchAndSubmitProcessingTime += scale.dispatchAndSubmit_time;
         readbackProcessingTime += scale.readback_time;
         postProcessProcessingTime += scale.postProcess_time;
-        compute.scales.push_back(std::move(scale));
-        if (level + 1 >= kDefaultScaleWeights.size()) {
-            break;
-        }
-        if (currWidth < 8 || currHeight < 8) {
-            break;
-        }
-
-        auto next1Future = std::async(
-            std::launch::async,
-            [&curr1, currWidth, currHeight] {
-                return RunDownsample2x2Cpu(curr1, currWidth, currHeight);
-            });
-        DownsampleOutputs next2 = RunDownsample2x2Cpu(curr2, currWidth, currHeight);
-        DownsampleOutputs next1 = next1Future.get();
-        createShaderModuleProcessingTime += next1.createShaderModule_time + next2.createShaderModule_time;
-        createPSOProcessingTime += next1.createPSO_time + next2.createPSO_time;
-        createBuffersProcessingTime += next1.createBuffers_time + next2.createBuffers_time;
-        writeInputBuffersProcessingTime += next1.writeInputBuffers_time + next2.writeInputBuffers_time;
-        createPipelineLayoutsProcessingTime += next1.createPipelineLayouts_time + next2.createPipelineLayouts_time;
-        createBindGroupsProcessingTime += next1.createBindGroups_time + next2.createBindGroups_time;
-        dispatchAndSubmitProcessingTime += next1.dispatchAndSubmit_time + next2.dispatchAndSubmit_time;
-        readbackProcessingTime += next1.readback_time + next2.readback_time;
-        if (level == 0) {
-            firstDownsample1 = next1;
-            firstDownsample2 = next2;
-        }
-        currWidth = next1.width;
-        currHeight = next1.height;
-        curr1 = std::move(next1.pixels);
-        curr2 = std::move(next2.pixels);
     }
 
     if (identicalInput) {
@@ -1643,7 +2324,7 @@ void RunComparison(
         debugInfo.stage0Var1Path = options.debugDumpDir / "stage0_var1_f32le.gpu.bin";
         debugInfo.stage0Var2Path = options.debugDumpDir / "stage0_var2_f32le.gpu.bin";
         debugInfo.stage0Cov12Path = options.debugDumpDir / "stage0_cov12_f32le.gpu.bin";
-        debugInfo.stage0ElemCount = compute.scales.empty() ? 0 : compute.scales[0].ssimMap.size();
+        debugInfo.stage0ElemCount = compute.scales.empty() ? 0 : compute.scales[0].elemCount;
         WriteU8Buffer(debugInfo.image1RgbaPath, image1.pixels);
         WriteU8Buffer(debugInfo.image2RgbaPath, image2.pixels);
         WriteF32LeBuffer(debugInfo.stage0DssimPath, compute.scales[0].ssimMap);
@@ -1652,13 +2333,13 @@ void RunComparison(
         WriteF32LeBuffer(debugInfo.stage0Var1Path, compute.scales[0].var1);
         WriteF32LeBuffer(debugInfo.stage0Var2Path, compute.scales[0].var2);
         WriteF32LeBuffer(debugInfo.stage0Cov12Path, compute.scales[0].cov12);
-        if (compute.scales.size() > 1 && !firstDownsample1.pixels.empty() && !firstDownsample2.pixels.empty()) {
+        if (compute.scales.size() > 1 && pyramid1.size() > 1 && pyramid2.size() > 1) {
             debugInfo.image1Scale1Path = options.debugDumpDir / "image1_scale1_rgba8.gpu.bin";
             debugInfo.image2Scale1Path = options.debugDumpDir / "image2_scale1_rgba8.gpu.bin";
             debugInfo.stage1DssimPath = options.debugDumpDir / "stage1_dssim5x5_gaussian_linear_u32le.gpu.bin";
-            debugInfo.stage1ElemCount = compute.scales[1].ssimMap.size();
-            WriteU8Buffer(debugInfo.image1Scale1Path, ConvertLinearPluToRgba8(firstDownsample1.pixels));
-            WriteU8Buffer(debugInfo.image2Scale1Path, ConvertLinearPluToRgba8(firstDownsample2.pixels));
+            debugInfo.stage1ElemCount = compute.scales[1].elemCount;
+            WriteU8Buffer(debugInfo.image1Scale1Path, ConvertLinearPluToRgba8(pyramid1[1]));
+            WriteU8Buffer(debugInfo.image2Scale1Path, ConvertLinearPluToRgba8(pyramid2[1]));
             WriteF32LeBuffer(debugInfo.stage1DssimPath, compute.scales[1].ssimMap);
         }
         debugInfoPtr = &debugInfo;
@@ -1714,11 +2395,23 @@ int main(int argc, char** argv) {
     try {
         const CliOptions options = ParseArgs(argc, argv);
         const auto stage0ShaderPath = ResolveShaderPath(argv[0], "stage0_absdiff.wgsl");
+        const auto stage0ScoreShaderPath = ResolveShaderPath(argv[0], "stage0_score.wgsl");
         const auto labPreprocessShaderPath = ResolveShaderPath(argv[0], "lab_preprocess.wgsl");
+        const auto downsampleShaderPath = ResolveShaderPath(argv[0], "downsample_2x2.wgsl");
+        const auto rgba8ToLinearShaderPath = ResolveShaderPath(argv[0], "rgba8_to_linear.wgsl");
         const auto stage0ShaderSource = ReadAllText(stage0ShaderPath);
+        const auto stage0ScoreShaderSource = ReadAllText(stage0ScoreShaderPath);
         const auto labPreprocessShaderSource = ReadAllText(labPreprocessShaderPath);
+        const auto downsampleShaderSource = ReadAllText(downsampleShaderPath);
+        const auto rgba8ToLinearShaderSource = ReadAllText(rgba8ToLinearShaderPath);
         GpuSession session =
-            CreateGpuSession(labPreprocessShaderSource, stage0ShaderSource);
+            CreateGpuSession(
+                labPreprocessShaderSource,
+                stage0ShaderSource,
+                stage0ScoreShaderSource,
+                downsampleShaderSource,
+                rgba8ToLinearShaderSource,
+                options.debugDumpEnabled);
         if (options.profilingEnabled) {
             PrintProfilingBuckets(
                 BuildSessionInitProfilingBuckets(session.initProfiling),
