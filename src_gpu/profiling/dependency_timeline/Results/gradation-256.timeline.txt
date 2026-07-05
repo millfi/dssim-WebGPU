@@ -1,0 +1,18 @@
+# Measured with:
+# dssim-WebGPU tests/gradation.png tests/gradation-256.png --out build/dependency_timeline_profile.json --profiling
+# CPU wall spans are sequential on the first line.
+begin_0 <-------------------------> end_0 -> begin_1 <------------------------> end_1 -> begin_2 <-----------> end_2 -> begin_3 <-------> end_3 -> begin_4 <-----> end_4 -> begin_5 <--> end_5
+# Timestamp Query executes asynchronously within the combined command-submit/readback wall interval.
+# Its absolute placement against the CPU clock is schematic because WebGPU exposes duration, not CPU/GPU clock calibration.
+begin_1-end_1 -> begin_6 <---------> end_6 -> begin_4-end_4
+# Scale 1-4 aggregation runs on a worker concurrently with scale 0 aggregation.
+begin_3-end_3 -> begin_7 <--> end_7
+
+begin_0-end_0 := create_buffers = 49000 microseconds
+begin_1-end_1 := upload_inputs = 48000 microseconds
+begin_2-end_2 := command_encode_submit = 21000 microseconds
+begin_3-end_3 := readback_map_wait = 14000 microseconds
+begin_4-end_4 := postprocess_base_scale = 9652 microseconds
+begin_5-end_5 := uncategorized_wall = 3000 microseconds
+begin_6-end_6 := gpu_timestamp_query = 17564 microseconds
+begin_7-end_7 := postprocess_remaining_scales = 2571 microseconds

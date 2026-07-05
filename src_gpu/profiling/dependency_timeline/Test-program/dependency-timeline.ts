@@ -224,8 +224,11 @@ function tokenize(input: string): Token[] {
 
 class Parser {
   private pos = 0;
+  private tokens: Token[];
 
-  constructor(private tokens: Token[]) {}
+  constructor(tokens: Token[]) {
+    this.tokens = tokens;
+  }
 
   private peek(offset = 0): Token {
     return (

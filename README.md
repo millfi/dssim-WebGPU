@@ -161,12 +161,16 @@ fields:
 - `readback_ms`
 - `gpu_submit_wait_ms`
 - `gpu_timestamp_ms`
+- `post_process_base_scale_ms`
+- `post_process_remaining_scales_ms`
 - `post_process_ms`
 
 `dispatch_and_submit_ms` measures CPU command encoding/submission, not pure
 shader execution. `readback_ms` includes GPU completion and mapping wait time.
 `gpu_timestamp_ms` may overlap the wall-clock buckets because CPU and GPU work
 asynchronously, so it is not included in the mutually exclusive total.
+The two per-scale post-process fields are independent durations that overlap
+when the parallel aggregation path is active.
 Profiling requires an adapter that supports the WebGPU `TimestampQuery`
 feature.
 

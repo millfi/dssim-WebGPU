@@ -82,6 +82,8 @@ struct ScaleOutputs {
     std::chrono::milliseconds readback_time{0};
     std::chrono::milliseconds postProcess_time{0};
     double gpuTimestampMs = 0.0;
+    double postProcessBaseScaleMs = 0.0;
+    double postProcessRemainingScalesMs = 0.0;
 };
 
 struct MultiScaleOutputs {
@@ -142,6 +144,8 @@ struct ProfilingSummary {
     std::chrono::milliseconds postProcessTime{0};
     std::chrono::milliseconds otherTime{0};
     double gpuTimestampMs = 0.0;
+    double postProcessBaseScaleMs = 0.0;
+    double postProcessRemainingScalesMs = 0.0;
 };
 
 struct RgbaPairComparisonResult {
@@ -696,6 +700,10 @@ std::string BuildJson(
        << (profiling.dispatchAndSubmitTime + profiling.readbackTime).count() << ",\n";
     os << "    \"gpu_timestamp_ms\": " << std::setprecision(9)
        << profiling.gpuTimestampMs << ",\n";
+    os << "    \"post_process_base_scale_ms\": " << std::setprecision(9)
+       << profiling.postProcessBaseScaleMs << ",\n";
+    os << "    \"post_process_remaining_scales_ms\": " << std::setprecision(9)
+       << profiling.postProcessRemainingScalesMs << ",\n";
     os << "    \"post_process_ms\": " << profiling.postProcessTime.count() << ",\n";
     os << "    \"other_ms\": " << profiling.otherTime.count() << "\n";
     os << "  }";
@@ -1722,15 +1730,33 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     };
     if (levelCount > 1u && baseElemCount >= 65536u) {
         auto remainingLevels = std::async(std::launch::async, [&] {
+            const auto startedAt = std::chrono::steady_clock::now();
             for (std::size_t level = 1; level < levelCount; ++level) {
                 processLevel(level);
             }
+            return std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - startedAt)
+                .count();
         });
+        const auto baseScaleStartedAt = std::chrono::steady_clock::now();
         processLevel(0);
-        remainingLevels.get();
+        outputs.front().postProcessBaseScaleMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - baseScaleStartedAt)
+                .count();
+        outputs.front().postProcessRemainingScalesMs = remainingLevels.get();
     } else {
         for (std::size_t level = 0; level < levelCount; ++level) {
+            const auto levelStartedAt = std::chrono::steady_clock::now();
             processLevel(level);
+            const double levelMs = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - levelStartedAt)
+                                       .count();
+            if (level == 0u) {
+                outputs.front().postProcessBaseScaleMs = levelMs;
+            } else {
+                outputs.front().postProcessRemainingScalesMs += levelMs;
+            }
         }
     }
     resources.readbackSsimBuffer.Unmap();
@@ -2394,6 +2420,8 @@ RgbaPairComparisonResult CompareRgba8Pair(
     milliseconds readbackProcessingTime{0};
     milliseconds postProcessProcessingTime{0};
     double gpuTimestampProcessingMs = 0.0;
+    double postProcessBaseScaleMs = 0.0;
+    double postProcessRemainingScalesMs = 0.0;
 
     if (collectDebugData) {
         pyramid1.push_back(std::move(linear1));
@@ -2447,6 +2475,8 @@ RgbaPairComparisonResult CompareRgba8Pair(
         readbackProcessingTime += scale.readback_time;
         postProcessProcessingTime += scale.postProcess_time;
         gpuTimestampProcessingMs += scale.gpuTimestampMs;
+        postProcessBaseScaleMs += scale.postProcessBaseScaleMs;
+        postProcessRemainingScalesMs += scale.postProcessRemainingScalesMs;
     }
 
     if (identicalInput) {
@@ -2497,6 +2527,8 @@ RgbaPairComparisonResult CompareRgba8Pair(
         .postProcessTime = postProcessProcessingTime,
         .otherTime = milliseconds(comparisonToScoreMs) - measuredProcessingTime,
         .gpuTimestampMs = gpuTimestampProcessingMs,
+        .postProcessBaseScaleMs = postProcessBaseScaleMs,
+        .postProcessRemainingScalesMs = postProcessRemainingScalesMs,
     };
     return result;
 }

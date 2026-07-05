@@ -161,12 +161,15 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 - `readback_ms`
 - `gpu_submit_wait_ms`
 - `gpu_timestamp_ms`
+- `post_process_base_scale_ms`
+- `post_process_remaining_scales_ms`
 - `post_process_ms`
 
 `dispatch_and_submit_ms` はCPU側のコマンド構築・送信時間であり、
 純粋なシェーダー実行時間ではありません。`readback_ms` にはGPU完了待ちと
 マッピング待ちが含まれます。CPUとGPUは非同期に重なるため、
 `gpu_timestamp_ms` はwall-clock時間区分の合計には含まれません。
+2つのscale別post-process項目も、並列集計時には互いに重なる独立時間です。
 プロファイリングにはWebGPU `TimestampQuery` feature対応adapterが必要です。
 
 ## 現在の高速化設計
