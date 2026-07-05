@@ -810,7 +810,7 @@ void MapBufferBlocking(
 
     while (!mapState.done.load(std::memory_order_acquire)) {
         instance.ProcessEvents();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::yield();
     }
 
     if (mapState.status != wgpu::MapAsyncStatus::Success) {
