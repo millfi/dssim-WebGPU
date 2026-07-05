@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 #include <numeric>
+#include <span>
 
 #include <dawn/dawn_proc.h>
 #include <dawn/native/DawnNative.h>
@@ -141,6 +142,13 @@ struct ProfilingSummary {
     std::chrono::milliseconds postProcessTime{0};
     std::chrono::milliseconds otherTime{0};
     double gpuTimestampMs = 0.0;
+};
+
+struct RgbaPairComparisonResult {
+    MultiScaleOutputs compute;
+    ProfilingSummary profiling;
+    std::vector<LinearRgba> debugScale1Image1;
+    std::vector<LinearRgba> debugScale1Image2;
 };
 
 struct Stage0Resources {
@@ -477,7 +485,8 @@ const std::array<float, 256>& SrgbToLinearLut() {
     return lut;
 }
 
-std::vector<LinearRgba> ConvertRgba8ToLinearPlu(const std::vector<std::uint8_t>& bytes) {
+std::vector<LinearRgba> ConvertRgba8ToLinearPlu(
+    std::span<const std::uint8_t> bytes) {
     if ((bytes.size() % 4) != 0) {
         throw std::runtime_error("rgba8 byte count is not divisible by 4");
     }
@@ -561,7 +570,9 @@ void WriteF32LeBuffer(const std::filesystem::path& outPath, const std::vector<fl
     }
 }
 
-void WriteU8Buffer(const std::filesystem::path& outPath, const std::vector<std::uint8_t>& values) {
+void WriteU8Buffer(
+    const std::filesystem::path& outPath,
+    std::span<const std::uint8_t> values) {
     const auto parent = outPath.parent_path();
     if (!parent.empty()) {
         std::filesystem::create_directories(parent);
@@ -1265,8 +1276,8 @@ ScaleOutputs RunStage0Compute(
 
 std::vector<ScaleOutputs> RunStage0BatchCompute(
     GpuSession& session,
-    const std::vector<std::uint8_t>& input1,
-    const std::vector<std::uint8_t>& input2,
+    std::span<const std::uint8_t> input1,
+    std::span<const std::uint8_t> input2,
     const std::vector<std::uint32_t>& widths,
     const std::vector<std::uint32_t>& heights) {
     const std::size_t levelCount = widths.size();
@@ -2321,55 +2332,47 @@ void PrintProfilingBuckets(
     std::cout.precision(oldPrecision);
 }
 
-void RunComparison(
+RgbaPairComparisonResult CompareRgba8Pair(
     GpuSession& session,
-    const CliOptions& options,
-    const ComparisonRequest& request) {
-    const DecodedImage image1 = LoadPngRgba8(request.image1);
-    const DecodedImage image2 = LoadPngRgba8(request.image2);
-    if (image1.pixels.empty() || image2.pixels.empty()) {
-        throw std::runtime_error("decoded png pixels are empty");
+    std::span<const std::uint8_t> rgba1,
+    std::span<const std::uint8_t> rgba2,
+    std::uint32_t width,
+    std::uint32_t height,
+    bool collectDebugData) {
+    if (width == 0u || height == 0u) {
+        throw std::runtime_error("RGBA8 comparison dimensions must be non-zero");
     }
-    if (image1.width != image2.width || image1.height != image2.height) {
-        throw std::runtime_error("image size mismatch; multi-scale stage requires identical dimensions");
+    const std::size_t expectedBytes =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+    if (rgba1.size() != expectedBytes || rgba2.size() != expectedBytes) {
+        throw std::runtime_error(
+            "RGBA8 comparison buffer size does not match width and height");
     }
-    const auto decodeDoneAt = std::chrono::steady_clock::now();
+    const auto comparisonStartedAt = std::chrono::steady_clock::now();
 
-    const DecodedInputInfo decoded1 = {
-        .width = image1.width,
-        .height = image1.height,
-        .channels = image1.channels,
-        .byteCount = image1.pixels.size(),
-    };
-    const DecodedInputInfo decoded2 = {
-        .width = image2.width,
-        .height = image2.height,
-        .channels = image2.channels,
-        .byteCount = image2.pixels.size(),
-    };
-
-    std::vector<LinearRgba> input1;
-    std::vector<LinearRgba> input2;
-    if (options.debugDumpEnabled) {
+    std::vector<LinearRgba> linear1;
+    std::vector<LinearRgba> linear2;
+    if (collectDebugData) {
         auto input1Future = std::async(
             std::launch::async,
-            [&image1] { return ConvertRgba8ToLinearPlu(image1.pixels); });
-        input2 = ConvertRgba8ToLinearPlu(image2.pixels);
-        input1 = input1Future.get();
+            [rgba1] { return ConvertRgba8ToLinearPlu(rgba1); });
+        linear2 = ConvertRgba8ToLinearPlu(rgba2);
+        linear1 = input1Future.get();
     }
 
     // Identical input produces score 0 by definition (matches reference behavior).
     // GPU dispatches may introduce f32 non-determinism between separate runs,
     // so we detect this case on the CPU side.
-    const bool identicalInput = (image1.pixels == image2.pixels);
+    const bool identicalInput = std::equal(rgba1.begin(), rgba1.end(), rgba2.begin());
 
-    MultiScaleOutputs compute;
+    RgbaPairComparisonResult result;
+    MultiScaleOutputs& compute = result.compute;
     std::vector<std::vector<LinearRgba>> pyramid1;
     std::vector<std::vector<LinearRgba>> pyramid2;
     std::vector<std::uint32_t> pyramidWidths;
     std::vector<std::uint32_t> pyramidHeights;
-    pyramidWidths.push_back(image1.width);
-    pyramidHeights.push_back(image1.height);
+    pyramidWidths.push_back(width);
+    pyramidHeights.push_back(height);
 
     while (pyramidWidths.size() < kDefaultScaleWeights.size()) {
         const std::uint32_t currWidth = pyramidWidths.back();
@@ -2392,9 +2395,9 @@ void RunComparison(
     milliseconds postProcessProcessingTime{0};
     double gpuTimestampProcessingMs = 0.0;
 
-    if (options.debugDumpEnabled) {
-        pyramid1.push_back(std::move(input1));
-        pyramid2.push_back(std::move(input2));
+    if (collectDebugData) {
+        pyramid1.push_back(std::move(linear1));
+        pyramid2.push_back(std::move(linear2));
         for (std::size_t level = 1; level < pyramidWidths.size(); ++level) {
             const std::uint32_t prevWidth = pyramidWidths[level - 1u];
             const std::uint32_t prevHeight = pyramidHeights[level - 1u];
@@ -2427,8 +2430,8 @@ void RunComparison(
         compute.scales =
             RunStage0BatchCompute(
                 session,
-                image1.pixels,
-                image2.pixels,
+                rgba1,
+                rgba2,
                 pyramidWidths,
                 pyramidHeights);
     }
@@ -2461,6 +2464,79 @@ void RunComparison(
         compute.score = 1.0 / std::max(compute.weightedSsim, std::numeric_limits<double>::epsilon()) - 1.0;
     }
 
+    if (collectDebugData && pyramid1.size() > 1u && pyramid2.size() > 1u) {
+        result.debugScale1Image1 = std::move(pyramid1[1]);
+        result.debugScale1Image2 = std::move(pyramid2[1]);
+    }
+
+    const auto scoreReadyAt = std::chrono::steady_clock::now();
+    const auto comparisonToScoreMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            scoreReadyAt - comparisonStartedAt)
+            .count();
+    const milliseconds measuredProcessingTime =
+        createShaderModuleProcessingTime +
+        createPSOProcessingTime +
+        createBuffersProcessingTime +
+        writeInputBuffersProcessingTime +
+        createPipelineLayoutsProcessingTime +
+        createBindGroupsProcessingTime +
+        dispatchAndSubmitProcessingTime +
+        readbackProcessingTime +
+        postProcessProcessingTime;
+    result.profiling = {
+        .decodeDoneToScoreMs = comparisonToScoreMs,
+        .createShaderModuleTime = createShaderModuleProcessingTime,
+        .createPSOTime = createPSOProcessingTime,
+        .createBuffersTime = createBuffersProcessingTime,
+        .writeInputBuffersTime = writeInputBuffersProcessingTime,
+        .createPipelineLayoutsTime = createPipelineLayoutsProcessingTime,
+        .createBindGroupsTime = createBindGroupsProcessingTime,
+        .dispatchAndSubmitTime = dispatchAndSubmitProcessingTime,
+        .readbackTime = readbackProcessingTime,
+        .postProcessTime = postProcessProcessingTime,
+        .otherTime = milliseconds(comparisonToScoreMs) - measuredProcessingTime,
+        .gpuTimestampMs = gpuTimestampProcessingMs,
+    };
+    return result;
+}
+
+void RunComparison(
+    GpuSession& session,
+    const CliOptions& options,
+    const ComparisonRequest& request) {
+    const DecodedImage image1 = LoadPngRgba8(request.image1);
+    const DecodedImage image2 = LoadPngRgba8(request.image2);
+    if (image1.pixels.empty() || image2.pixels.empty()) {
+        throw std::runtime_error("decoded png pixels are empty");
+    }
+    if (image1.width != image2.width || image1.height != image2.height) {
+        throw std::runtime_error(
+            "image size mismatch; multi-scale stage requires identical dimensions");
+    }
+
+    RgbaPairComparisonResult comparison = CompareRgba8Pair(
+        session,
+        image1.pixels,
+        image2.pixels,
+        image1.width,
+        image1.height,
+        options.debugDumpEnabled);
+    MultiScaleOutputs& compute = comparison.compute;
+
+    const DecodedInputInfo decoded1 = {
+        .width = image1.width,
+        .height = image1.height,
+        .channels = image1.channels,
+        .byteCount = image1.pixels.size(),
+    };
+    const DecodedInputInfo decoded2 = {
+        .width = image2.width,
+        .height = image2.height,
+        .channels = image2.channels,
+        .byteCount = image2.pixels.size(),
+    };
+
     DebugDumpInfo debugInfo;
     DebugDumpInfo* debugInfoPtr = nullptr;
     if (options.debugDumpEnabled) {
@@ -2473,7 +2549,8 @@ void RunComparison(
         debugInfo.stage0Var1Path = options.debugDumpDir / "stage0_var1_f32le.gpu.bin";
         debugInfo.stage0Var2Path = options.debugDumpDir / "stage0_var2_f32le.gpu.bin";
         debugInfo.stage0Cov12Path = options.debugDumpDir / "stage0_cov12_f32le.gpu.bin";
-        debugInfo.stage0ElemCount = compute.scales.empty() ? 0 : compute.scales[0].elemCount;
+        debugInfo.stage0ElemCount =
+            compute.scales.empty() ? 0 : compute.scales[0].elemCount;
         WriteU8Buffer(debugInfo.image1RgbaPath, image1.pixels);
         WriteU8Buffer(debugInfo.image2RgbaPath, image2.pixels);
         WriteF32LeBuffer(debugInfo.stage0DssimPath, compute.scales[0].ssimMap);
@@ -2482,60 +2559,51 @@ void RunComparison(
         WriteF32LeBuffer(debugInfo.stage0Var1Path, compute.scales[0].var1);
         WriteF32LeBuffer(debugInfo.stage0Var2Path, compute.scales[0].var2);
         WriteF32LeBuffer(debugInfo.stage0Cov12Path, compute.scales[0].cov12);
-        if (compute.scales.size() > 1 && pyramid1.size() > 1 && pyramid2.size() > 1) {
+        if (compute.scales.size() > 1u &&
+            !comparison.debugScale1Image1.empty() &&
+            !comparison.debugScale1Image2.empty()) {
             debugInfo.image1Scale1Path = options.debugDumpDir / "image1_scale1_rgba8.gpu.bin";
             debugInfo.image2Scale1Path = options.debugDumpDir / "image2_scale1_rgba8.gpu.bin";
             debugInfo.stage1DssimPath = options.debugDumpDir / "stage1_dssim5x5_gaussian_linear_u32le.gpu.bin";
             debugInfo.stage1ElemCount = compute.scales[1].elemCount;
-            WriteU8Buffer(debugInfo.image1Scale1Path, ConvertLinearPluToRgba8(pyramid1[1]));
-            WriteU8Buffer(debugInfo.image2Scale1Path, ConvertLinearPluToRgba8(pyramid2[1]));
-            WriteF32LeBuffer(debugInfo.stage1DssimPath, compute.scales[1].ssimMap);
+            WriteU8Buffer(
+                debugInfo.image1Scale1Path,
+                ConvertLinearPluToRgba8(comparison.debugScale1Image1));
+            WriteU8Buffer(
+                debugInfo.image2Scale1Path,
+                ConvertLinearPluToRgba8(comparison.debugScale1Image2));
+            WriteF32LeBuffer(
+                debugInfo.stage1DssimPath,
+                compute.scales[1].ssimMap);
         }
         debugInfoPtr = &debugInfo;
     }
 
     std::ostringstream scoreText;
     scoreText << std::fixed << std::setprecision(8) << compute.score;
-    const auto scoreReadyAt = std::chrono::steady_clock::now();
-    const auto decodeDoneToScoreMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(scoreReadyAt - decodeDoneAt).count();
-    const milliseconds measuredProcessingTime =
-        createShaderModuleProcessingTime +
-        createPSOProcessingTime +
-        createBuffersProcessingTime +
-        writeInputBuffersProcessingTime +
-        createPipelineLayoutsProcessingTime +
-        createBindGroupsProcessingTime +
-        dispatchAndSubmitProcessingTime +
-        readbackProcessingTime +
-        postProcessProcessingTime;
     CliOptions resultOptions = options;
     resultOptions.image1 = request.image1;
     resultOptions.image2 = request.image2;
-    const ProfilingSummary profiling = {
-        .decodeDoneToScoreMs = decodeDoneToScoreMs,
-        .createShaderModuleTime = createShaderModuleProcessingTime,
-        .createPSOTime = createPSOProcessingTime,
-        .createBuffersTime = createBuffersProcessingTime,
-        .writeInputBuffersTime = writeInputBuffersProcessingTime,
-        .createPipelineLayoutsTime = createPipelineLayoutsProcessingTime,
-        .createBindGroupsTime = createBindGroupsProcessingTime,
-        .dispatchAndSubmitTime = dispatchAndSubmitProcessingTime,
-        .readbackTime = readbackProcessingTime,
-        .postProcessTime = postProcessProcessingTime,
-        .otherTime = milliseconds(decodeDoneToScoreMs) - measuredProcessingTime,
-        .gpuTimestampMs = gpuTimestampProcessingMs,
-    };
 
     if (!resultOptions.out.empty()) {
         const std::string json =
-            BuildJson(resultOptions, session.adapterName, decoded1, decoded2, compute, profiling, debugInfoPtr);
+            BuildJson(
+                resultOptions,
+                session.adapterName,
+                decoded1,
+                decoded2,
+                compute,
+                comparison.profiling,
+                debugInfoPtr);
         WriteStringFile(resultOptions.out, json);
     }
 
     std::cout << scoreText.str() << '\t' << resultOptions.image2.string() << '\n';
     if (resultOptions.profilingEnabled) {
-        PrintProfilingBuckets(BuildRuntimeProfilingBuckets(profiling), "[profiling] ", "");
+        PrintProfilingBuckets(
+            BuildRuntimeProfilingBuckets(comparison.profiling),
+            "[profiling] ",
+            "");
     }
 }
 
