@@ -13,6 +13,13 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> out_lab: Vec4Buf;
 @group(0) @binding(2) var<uniform> params: Params;
 
+const workgroup_width = 16u;
+const tile_radius = 2u;
+const tile_width = workgroup_width + tile_radius * 2u;
+const tile_len = tile_width * tile_width;
+
+var<workgroup> tile_lab: array<vec4<f32>, tile_len>;
+
 fn cbrt_poly(x: f32) -> f32 {
     var y = (-0.5 * x + 1.51) * x + 0.2;
     var y3 = y * y * y;
@@ -62,50 +69,53 @@ fn lab_from_rgbaplu(px: vec4<f32>, x: i32, y: i32) -> vec3<f32> {
     return vec3<f32>(l, a2, b2);
 }
 
-fn gaussian_weight_5x5(dx: i32, dy: i32) -> f32 {
-    let ax = abs(dx);
-    let ay = abs(dy);
-    if (ax == 0 && ay == 0) {
-        return 0.113540;
-    }
-    if ((ax == 1 && ay == 0) || (ax == 0 && ay == 1)) {
-        return 0.079586;
-    }
-    if ((ax == 2 && ay == 0) || (ax == 0 && ay == 2)) {
-        return 0.032123;
-    }
-    if (ax == 1 && ay == 1) {
-        return 0.055786;
-    }
-    if ((ax == 2 && ay == 1) || (ax == 1 && ay == 2)) {
-        return 0.022516;
-    }
-    return 0.009088;
-}
+const gaussian_weights = array<f32, 25>(
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.032123, 0.079586, 0.113540, 0.079586, 0.032123,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088,
+);
 
 @compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+) {
+    let max_x = i32(params.width) - 1;
+    let max_y = i32(params.height) - 1;
+    let tile_origin_x = i32(workgroup_id.x * workgroup_width) - i32(tile_radius);
+    let tile_origin_y = i32(workgroup_id.y * workgroup_width) - i32(tile_radius);
+
+    // Load and convert the 20x20 input tile cooperatively. Each LAB value is
+    // shared by all neighboring output pixels in this workgroup.
+    for (var tile_i = local_index; tile_i < tile_len; tile_i = tile_i + workgroup_width * workgroup_width) {
+        let tile_x = tile_i % tile_width;
+        let tile_y = tile_i / tile_width;
+        let x = clamp(tile_origin_x + i32(tile_x), 0, max_x);
+        let y = clamp(tile_origin_y + i32(tile_y), 0, max_y);
+        let input_i = u32(y) * params.width + u32(x);
+        tile_lab[tile_i] = vec4<f32>(lab_from_rgbaplu(in_pixels.values[input_i], x, y), 0.0);
+    }
+    workgroupBarrier();
+
     if (gid.x >= params.width || gid.y >= params.height) {
         return;
     }
-    let i = gid.y * params.width + gid.x;
 
-    let x = i32(gid.x);
-    let y = i32(gid.y);
-    let max_x = i32(params.width) - 1;
-    let max_y = i32(params.height) - 1;
-    // Input is already linear premultiplied alpha (RGBAPLU) from CPU.
-    let center = lab_from_rgbaplu(in_pixels.values[i], x, y);
+    let i = gid.y * params.width + gid.x;
+    let center_i = (lid.y + tile_radius) * tile_width + lid.x + tile_radius;
+    let center = tile_lab[center_i].xyz;
 
     var pre_a = 0.0;
     var pre_b = 0.0;
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let nx = clamp(x + dx, 0, max_x);
-            let ny = clamp(y + dy, 0, max_y);
-            let ni = u32(ny) * params.width + u32(nx);
-            let w = gaussian_weight_5x5(dx, dy);
-            let lab = lab_from_rgbaplu(in_pixels.values[ni], nx, ny);
+            let w = gaussian_weights[u32((dy + 2) * 5 + dx + 2)];
+            let tile_i = u32(i32(center_i) + dy * i32(tile_width) + dx);
+            let lab = tile_lab[tile_i].xyz;
             pre_a = pre_a + w * lab.y;
             pre_b = pre_b + w * lab.z;
         }

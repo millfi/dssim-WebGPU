@@ -27,26 +27,13 @@ struct Params {
 @group(0) @binding(7) var<storage, read_write> out_cov12: F32Buf;
 @group(0) @binding(8) var<uniform> params: Params;
 
-fn gaussian_weight_5x5(dx: i32, dy: i32) -> f32 {
-    let ax = abs(dx);
-    let ay = abs(dy);
-    if (ax == 0 && ay == 0) {
-        return 0.113540;
-    }
-    if ((ax == 1 && ay == 0) || (ax == 0 && ay == 1)) {
-        return 0.079586;
-    }
-    if ((ax == 2 && ay == 0) || (ax == 0 && ay == 2)) {
-        return 0.032123;
-    }
-    if (ax == 1 && ay == 1) {
-        return 0.055786;
-    }
-    if ((ax == 2 && ay == 1) || (ax == 1 && ay == 2)) {
-        return 0.022516;
-    }
-    return 0.009088;
-}
+const gaussian_weights = array<f32, 25>(
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.032123, 0.079586, 0.113540, 0.079586, 0.032123,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088,
+);
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -71,7 +58,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let nx = clamp(x + dx, 0, max_x);
             let ny = clamp(y + dy, 0, max_y);
             let ni = u32(ny) * params.width + u32(nx);
-            let w = gaussian_weight_5x5(dx, dy);
+            let w = gaussian_weights[u32((dy + 2) * 5 + dx + 2)];
 
             let lab1 = in1.values[ni].xyz;
             let lab2 = in2.values[ni].xyz;
