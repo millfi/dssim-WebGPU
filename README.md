@@ -1,68 +1,149 @@
-## WebGPU (Dawn) status in this fork
+# dssim-WebGPU
 
-This repository also contains an experimental WebGPU implementation in `src_gpu/`.
+An optimized C++20/WebGPU implementation of the DSSIM image comparison
+algorithm. The native GPU executable uses Dawn and WGSL compute shaders.
 
-- バイナリ名: `dssim-WebGPU`
-- 入力画像: PNG only (decoded with `libpng`)
-- 使用言語: C++20 (set by CMake defaults; no extra build flag required)
-- スコア一致目標: 浮動小数点数の加算や乗算を、結合法則を満たすとして式変形した結果による、浮動小数点数が実際にはこれらの結合法則を満たさないことによるreferenceからのスコアの不一致は受け入れる。
-### Build and run (PowerShell7)
+## Requirements
 
-`CMakeLists.txt` でC++20を使うようコンパイルオプションを設定
-```powershell
-cmake -S . -B build
+- Windows with a D3D12-capable GPU
+- PowerShell
+- CMake 3.24 or newer
+- A C++20 compiler
 
-cmake --build build --config Release --target dssim_webgpu
+The top-level CMake configuration selects C++20 automatically. No additional
+C++ standard flag is required.
 
-.\build\src_gpu\Release\dssim-WebGPU.exe `
-  .\tests\gray-profile.png .\tests\gray-profile2.png `
-  --profiling `
-  --out .\out\gpu.json `
-  --debug-dump-dir .\out\debug
-```
+Both input images must be PNG files with identical dimensions.
 
-If `--out` is omitted, the score is printed to stdout.
+## Build
 
-If `--profiling` is omitted, profiling is not printed to stdout.
-
-To reuse the same WebGPU device and pipelines across multiple comparisons in one process, use
-`--stdin-pairs` and provide one tab-delimited pair per line on stdin:
+Run all repository commands from PowerShell:
 
 ```powershell
-$tab = [char]9
-@(
-  ".\tests\gradation.png${tab}.\tests\gradation-fs8.png"
-  ".\tests\gradation.png${tab}.\tests\gradation-256.png"
-) | .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling
+& cmake -S . -B build
+& cmake --build build --config Release --target dssim_webgpu
 ```
 
-If Dawn is not available (for example after deleting `third_party/dawn`), CMake tries to auto-install it by default.  
-You can explicitly disable the sample with `-DDSSIM_ENABLE_DAWN_SAMPLE=OFF`.
+The executable is written to:
 
-### Profiling output
+```text
+build\src_gpu\Release\dssim-WebGPU.exe
+```
 
-When `--profiling` is specified, the executable prints MECE(現時点では、非同期を使い始めるとMECEは無理になる) profiling buckets in milliseconds:
+## Compare one pair
 
-- `session_init_total_ms`
-- `session_init_pipeline_setup_ms`
-- `session_init_resource_prep_ms`
-- `session_init_gpu_execution_ms`
-- `session_init_cpu_postprocess_ms`
-- `session_init_other_ms`
-- `total_ms`
-- `pipeline_setup_ms`
-- `resource_prep_ms`
-- `gpu_execution_ms`
-- `cpu_postprocess_ms`
-- `other_ms`
+```powershell
+& .\build\src_gpu\Release\dssim-WebGPU.exe `
+    .\tests\laptop.png `
+    .\tests\laptop.q24.jpegli.jpg.png
+```
 
-Interpretation notes:
+The score and compared path are printed to stdout:
 
-- `pipeline_setup_ms` is shader module creation, pipeline layout creation, and PSO creation.
-- `resource_prep_ms` is buffer creation, buffer upload, and bind group creation.
-- `gpu_execution_ms` is dispatch/submit plus readback/map wait.
+```text
+0.00328379    .\tests\laptop.q24.jpegli.jpg.png
+```
 
-When `--out <json>` is specified, the raw timing breakdown is written to the top-level `profiling` object:
+Add `--profiling` to print timing information:
+
+```powershell
+& .\build\src_gpu\Release\dssim-WebGPU.exe `
+    .\tests\laptop.png `
+    .\tests\laptop.q24.jpegli.jpg.png `
+    --profiling
+```
+
+Add `--out <json>` for per-scale results and detailed timings:
+
+```powershell
+& .\build\src_gpu\Release\dssim-WebGPU.exe `
+    .\tests\laptop.png `
+    .\tests\laptop.q24.jpegli.jpg.png `
+    --profiling `
+    --out .\out\gpu.json
+```
+
+Add `--debug-dump-dir <directory>` to emit intermediate buffers used for
+score-matching investigations.
+
+## Fixed multi-pair benchmark
+
+Use `tests/test_pairs.txt` as the executable benchmark list. Each non-empty
+line contains two tab-delimited paths.
+
+Run the benchmark with this command:
+
+```powershell
+Get-Content .\tests\test_pairs.txt |
+    & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling
+```
+
+`--stdin-pairs` creates the WebGPU device, shader modules, layouts, and PSOs
+once, then reuses them for every pair. Image resolution is supplied through
+uniform buffers and dispatch dimensions, so different resolutions do not
+require different PSOs.
+
+`--stdin-pairs` cannot be combined with `--out` or `--debug-dump-dir`.
+
+## Mechanical score regression check
+
+The regression checker compares the WebGPU implementation against the original
+`dssim.exe` resolved from `PATH`:
+
+```powershell
+& .\tools\check_regression.ps1
+```
+
+To inspect the selected reference executable:
+
+```powershell
+(Get-Command dssim.exe -CommandType Application).Source
+```
+
+The checker:
+
+- reads every pair from `tests/test_pairs.txt`
+- runs all WebGPU comparisons in one `--stdin-pairs` session
+- runs the original `dssim.exe` for each pair
+- requires `0.00000000` for identical-image comparisons
+- requires relative error below 1% for other comparisons
+- prints a result table and exits nonzero if any comparison fails
+
+Useful overrides:
+
+```powershell
+& .\tools\check_regression.ps1 `
+    -PairList .\tests\test_pairs.txt `
+    -GpuExecutable .\build\src_gpu\Release\dssim-WebGPU.exe `
+    -RelativeTolerance 0.01
+```
+
+Run this check after every score-affecting or performance change and before
+committing an optimization.
+
+## Profiling output
+
+`--profiling` prints mutually exclusive timing buckets in milliseconds.
+
+Session initialization:
+
+- `session_init_pipeline_setup_ms`: shader modules, pipeline layouts, and PSOs
+- `session_init_resource_prep_ms`: session-level resource preparation
+- `session_init_gpu_execution_ms`: session-level GPU execution
+- `session_init_cpu_postprocess_ms`: session-level CPU post-processing
+- `session_init_other_ms`: uncategorized session initialization work
+
+Each comparison:
+
+- `pipeline_setup_ms`: per-comparison shader and pipeline setup
+- `resource_prep_ms`: buffer creation, uploads, and Bind Group creation
+- `gpu_execution_ms`: dispatch/submission plus readback/map waiting
+- `cpu_postprocess_ms`: CPU-side score aggregation
+- `other_ms`: color conversion, pyramid construction, and other uncategorized
+  work after decoding
+
+When `--out <json>` is used, the `profiling` object contains the finer-grained
+fields:
 
 - `decode_done_to_score_ms`
 - `create_shader_module_ms`
@@ -74,45 +155,54 @@ When `--out <json>` is specified, the raw timing breakdown is written to the top
 - `dispatch_and_submit_ms`
 - `readback_ms`
 - `post_process_ms`
-### Auto-install Dawn (Windows)
 
-By default, CMake fetches/builds Dawn automatically when it is missing:
+`dispatch_and_submit_ms` measures CPU command encoding/submission, not pure
+shader execution. `readback_ms` includes GPU completion and mapping wait time.
+
+## Current performance design
+
+- PSOs are created once per process and reused across all resolutions.
+- Stage buffers and Bind Groups grow to the largest encountered image and are
+  reused across scale levels and subsequent pairs.
+- Debug-statistics resources use a separate cache from the normal benchmark
+  path.
+- sRGB-to-linear conversion uses a 256-entry lookup table.
+- The two input images are converted and downsampled in parallel.
+- CPU pixel conversion and pyramid construction use the same parallel path for
+  all image sizes; there is no separate small-image fallback.
+- Only the SSIM map is read back during normal execution.
+
+## Optimization and score policy
+
+The current priority is reducing end-to-end latency while preserving scores.
+
+- Identical images must produce `0.00000000`.
+- Other pairs must remain below 1% relative error versus `dssim.exe`.
+- Floating-point precision and algebraic transformations may change only when
+  the regression check remains within tolerance.
+- Blur weights and SSIM constants must not change.
+- Keep all shader dispatches two-dimensional with
+  `@workgroup_size(16, 16, 1)` and dispatch dimensions
+  `(ceil(width / 16), ceil(height / 16), 1)`.
+
+## Dawn setup
+
+If Dawn is missing, CMake automatically invokes `tools/install_dawn.ps1` to
+prepare `third_party/depot_tools`, fetch Dawn into `third_party/dawn`, and build
+the required Dawn libraries.
+
+Disable automatic installation with:
 
 ```powershell
-cmake -S . -B build
-cmake --build build --config Release --target dssim_webgpu
+& cmake -S . -B build -DDSSIM_AUTO_INSTALL_DAWN=OFF
 ```
 
-This invokes `tools/install_dawn.ps1`, which installs `third_party/depot_tools`, fetches `third_party/dawn`, and builds `dawn_native`, `dawn_proc`, and `webgpu_dawn`.
+Disable the WebGPU target entirely with:
 
-To disable this behavior, pass `-DDSSIM_AUTO_INSTALL_DAWN=OFF`.
+```powershell
+& cmake -S . -B build -DDSSIM_ENABLE_DAWN_SAMPLE=OFF
+```
 
-### Notes
-
-- Images must have the same width/height.
-- `--debug-dump-dir` emits intermediate GPU buffers for mismatch analysis.
-- The default backend on Windows is D3D12.
-
-
-### Score-matching workflow
-
-For score-matching work, use `tests/test_list.csv` as the main regression list.
-The intended loop is:
-
-1. Build `dssim-WebGPU`.
-2. Run every image pair listed in `tests/test_list.csv`.
-3. Update the `dssim-WebGPU` column in `tests/test_list.csv` with the newly measured scores.
-4. Compare the updated GPU scores against `reference_score(dssim v3.4.0)` and focus on shrinking the gap.
-
-Current priority order:
-
-- identical-image comparisons must reach `0.00000000`
-- `gradation.png` vs `gradation-fs8.png` must stop showing a very large relative error
-- only after those are fixed should optimization work resume
-
-### Reference implementation
-
-For reproducible score-matching work, prefer keeping an upstream `dssim` checkout under `src_reference/`.
-If a locally built reference binary is available from that checkout, use it for validation in preference to a `dssim.exe` found on `PATH`.
-Using the `PATH` binary is acceptable only when it is known to match the checked out source/version.
-
+The reference source under `src_reference/` remains available for studying
+algorithm details. Automated regression validation intentionally uses the
+`dssim.exe` selected from `PATH`.
