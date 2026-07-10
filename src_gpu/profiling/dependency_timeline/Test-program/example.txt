@@ -1,0 +1,6 @@
+# 1行コメント
+begin_0 <-->end_0 -> begin_1 <------->end_1 -> begin_2 <->end_2 # 「<->」の-の個数は自由, 「A -> B」はBはAが終わらないと始めない依存関係を表す
+begin_0-end_0 -> begin_3 <-->end_3 -> begin_4 <-->end_4 # 非同期処理による1行前からのpiplineの分離の表現
+begin_3-end_3 -> begin_5 <--> end_5 # 同様にまた分離できる
+begin_3-end_3 := timer_name_3 = 10 microseconds # 処理区間 = プロファイリングタイマーの名前 = その計測時間
+begin_1-end_1 := timer_name_1 = 2 seconds # 簡単のため重複は許可、使用する単位はnanoseconds, microseconds, milliseconds, secondsの4つ。小数は簡単のため許可しない

@@ -5,5 +5,7 @@ out/
 third_party/dawn/
 third_party/depot_tools/
 third_party/.cipd/
+third_party/ffmpeg-build/
+third_party/ffmpeg-*/
 build_nothirdparty/
 build_without_dawn/

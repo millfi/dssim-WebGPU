@@ -21,6 +21,8 @@ use getopts::Options;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 use std::env;
+#[cfg(not(feature = "video"))]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -75,6 +77,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if files.len() < 2 {
         usage(&program);
         return Err("You must specify at least 2 files to compare".into());
+    }
+
+    let has_video = files.iter().any(|file| {
+        #[cfg(feature = "video")]
+        {
+            dssim::is_video_path(file)
+        }
+        #[cfg(not(feature = "video"))]
+        {
+            Path::new(file)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "mp4" | "m4v" | "mov" | "mkv" | "webm"
+                    )
+                })
+        }
+    });
+
+    if has_video {
+        #[cfg(feature = "video")]
+        {
+            if files.len() != 2 || !files.iter().all(dssim::is_video_path) {
+                return Err("Video comparison requires exactly two MP4/MOV/MKV/WebM files".into());
+            }
+            if map_output_file.is_some() {
+                return Err("-o SSIM maps are not supported for video comparison".into());
+            }
+            let comparison =
+                dssim::compare_video_files(&dssim::Dssim::new(), &files[0], &files[1])?;
+            println!(
+                "{:.8}\t{}\t({} frames)",
+                comparison.score, files[1], comparison.frames
+            );
+            return Ok(());
+        }
+        #[cfg(not(feature = "video"))]
+        {
+            return Err("This binary was built without video support; rebuild with --features video after running tools/build_ffmpeg_minimal.ps1".into());
+        }
     }
 
     let (images_send, mut images_recv) = ordered_channel::bounded(2);

@@ -7,6 +7,12 @@ use imgref::Img;
 use load_image::ImageData;
 use std::path::Path;
 
+#[cfg(feature = "video")]
+mod video;
+
+#[cfg(feature = "video")]
+pub use video::{compare_video_files, is_video_path, VideoComparison};
+
 fn load(attr: &Dssim, path: &Path) -> Result<DssimImage<f32>, load_image::Error> {
     let img = load_image::load_path(path)?;
     Ok(match img.bitmap {

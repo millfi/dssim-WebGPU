@@ -60,6 +60,27 @@ You'll need [Rust 1.63](https://rustup.rs) or later. Clone the repo and run:
 
 Will give you `./target/release/dssim`.
 
+### Windows video comparison (D3D11VA only)
+
+The optional `video` feature compares corresponding frames in two MP4/MOV/MKV/WebM files and prints their arithmetic-mean DSSIM. It accepts only D3D11VA-decoded frames: a missing compatible hardware decoder, driver failure, or a software-decoded frame is an error rather than a fallback.
+
+From a Visual Studio Developer PowerShell with Git Bash/MSYS2 `bash.exe` and GNU `make.exe` on `PATH`, build the stripped shared FFmpeg distribution and then the CLI:
+
+```powershell
+& .\tools\build_ffmpeg_minimal.ps1
+$env:FFMPEG_DIR = (Resolve-Path .\third_party\ffmpeg-8.1.2-shared)
+& cargo build --manifest-path .\src_reference\Cargo.toml --release --features video
+```
+
+The default output is `third_party\ffmpeg-8.1.2-shared`. Its `bin` directory must be on `PATH` when running `dssim.exe`, or its four FFmpeg DLLs must be copied next to `dssim.exe`:
+
+```powershell
+$env:PATH = "$(Resolve-Path .\third_party\ffmpeg-8.1.2-shared\bin);$env:PATH"
+& .\src_reference\target\release\dssim.exe original.webm modified.mp4
+```
+
+The build script downloads FFmpeg 8.1.2, the latest stable release when this integration was added. It includes only `avutil`, `avcodec`, `avformat`, and `swscale`; file I/O; MOV/MP4 and Matroska/WebM demuxers; H.264, HEVC, AV1, and VP9 parsers/decoders; and their D3D11VA accelerators. It disables the FFmpeg executable, encoders, muxers, filters, network, devices, and all other demuxers/codecs. Pass `-Linkage Static` with an explicit `-Prefix` only when a static distribution is specifically required.
+
 ## Accuracy
 
 Scores for version 3.2 [measured][2] against [TID2013][1] database:

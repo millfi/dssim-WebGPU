@@ -29,6 +29,7 @@ lodepng = { version = "3.12", default-features = false, features = ["rust_backen
 load_image = { version = "3.3", features = ["lcms2-static"] }
 crossbeam-channel = "0.5.15"
 ordered-channel = { version = "1.2.0" }
+ffmpeg-next = { version = "8.1.0", default-features = false, features = ["codec", "format", "software-scaling"], optional = true }
 
 [features]
 default = ["threads", "dssim-core/default", "no-macos-vimage"]
@@ -40,6 +41,9 @@ webp-static = ["load_image/webp-static"]
 # Decode JPEGs using libjpeg-turbo derivative (closer to the reference decoder)
 mozjpeg = ["load_image/mozjpeg"]
 no-macos-vimage = ["dssim-core/no-macos-vimage"]
+# Video comparison is opt-in because it links against the locally built,
+# hardware-only FFmpeg distribution produced by tools/build_ffmpeg_minimal.ps1.
+video = ["dep:ffmpeg-next"]
 
 [package.metadata.release]
 consolidate-commits = true
