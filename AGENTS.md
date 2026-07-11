@@ -52,10 +52,10 @@
 
 ### Known bottlenecks and opportunities
 
-- The preprocess shader (`lab_preprocess.wgsl`) runs the full LAB conversion (including `cbrt_poly`) for **every neighbor** in the 5×5 chroma blur — 25 LAB conversions per pixel per image. Consider converting all pixels to LAB first, then blurring in a separate pass.
-- Each scale level currently round-trips buffers through CPU (GPU → readback → re-upload). Keeping data on-GPU across scales would eliminate this overhead.
-- The downsample, preprocess, and stage0 are separate dispatches with separate buffer allocations. Fusing passes or reusing buffers could reduce overhead.
-- Pipeline/PSO creation is done once per session and reused across `--stdin-pairs`, but buffer creation/upload happens per comparison.
+- `lab_preprocess.comp` cooperatively converts a 20×20 LAB tile for each 16×16 workgroup, so neighboring output pixels already reuse LAB conversion work.
+- The normal batch path keeps all scale levels on-GPU in one command buffer, one queue submission, and one readback. The debug path intentionally uses per-scale readback for intermediate statistics.
+- Upload, device-local workspace, and readback arenas are reused across `--stdin-pairs`; a larger comparison can still trigger arena growth.
+- Shader objects and layouts are created once per session. The preprocess and 5×5 SSIM dispatches remain the main GPU execution cost.
 
 ## Score-matching workflow (reference — complete)
 
@@ -78,26 +78,26 @@
 ## Profiling output
 
 - When `--profiling` is specified, wall-clock MECE profiling buckets are printed in milliseconds:
-  - `pipeline_setup_ms`: shader module + pipeline layout + PSO creation
-  - `resource_prep_ms`: buffer creation + buffer upload + bind group creation
+  - `pipeline_setup_ms`: shader object + descriptor/pipeline layout creation
+  - `resource_prep_ms`: arena buffer creation + mapped input upload (push descriptors require no bind-group allocation)
   - `gpu_submit_wait_ms`: CPU wall time for dispatch/submit + readback/map wait
   - `cpu_postprocess_ms`: CPU-side score aggregation
   - `other_ms`: uncategorized overhead
-- `gpu_timestamp_ms` is the independent GPU execution duration measured with WebGPU
-  Timestamp Query. It can overlap CPU wall-clock buckets and is not added to the MECE total.
+- `gpu_timestamp_ms` is the independent GPU execution duration measured with Vulkan
+  timestamp queries. It can overlap CPU wall-clock buckets and is not added to the MECE total.
 - When `--out <json>` is specified, finer-grained timing is in the `profiling` object:
   - `create_shader_module_ms`, `create_pso_ms`, `create_buffer_ms`, `write_input_buffer_ms`, `create_pipeline_layout_ms`, `create_bind_group_ms`, `dispatch_and_submit_ms`, `readback_ms`, `gpu_submit_wait_ms`, `gpu_timestamp_ms`, `post_process_base_scale_ms`, `post_process_remaining_scales_ms`, `post_process_ms`
-- `dispatch_and_submit_ms` is CPU-side command encoding/submission cost, not pure WGSL kernel time.
+- `dispatch_and_submit_ms` is CPU-side Vulkan command encoding/submission cost, not pure shader execution time.
 - `readback_ms` includes waiting for GPU work completion plus readback/map overhead.
 
 ## GPU dispatch constraints
 
-- All shaders use 2D dispatch with `@workgroup_size(16, 16, 1)`.
+- All shaders use 2D dispatch with `layout(local_size_x=16, local_size_y=16, local_size_z=1)`.
 - Dispatch dimensions are `(ceil(width/16), ceil(height/16), 1)`.
 - This avoids exceeding `maxComputeWorkgroupsPerDimension` (65535) for large images (e.g. 3200×2400 required 120,000 1D workgroups, which silently failed).
 
 ## C++20 proof point
 
-- Keep at least one designated initializer in `src_gpu/dawn_checksum.cpp` (for example `ParamsData` / `DecodedInputInfo`) so non-C++20 builds fail early.
+- Keep at least one designated initializer in `src_gpu/dssim-WebGPU.cpp` (for example `ParamsData` / `DecodedInputInfo`) so non-C++20 builds fail early.
 
 

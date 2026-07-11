@@ -1,19 +1,29 @@
 # dssim-WebGPU
 
-DSSIM画像比較アルゴリズムをC++20とWebGPUで実装した高速化版です。
-ネイティブGPU実行ファイルはDawnとWGSLコンピュートシェーダーを使用します。
+DSSIM画像比較アルゴリズムをC++20とVulkanで実装した高速化版です。
+コマンドラインとビルドの互換性を保つため、実行ファイル名とCMakeターゲット名は
+従来のまま維持しています。
 
 英語版は [README.md](README.md) を参照してください。
 
 ## 必要環境
 
-- D3D12対応GPUを搭載したWindows
+- 次の機能に対応するVulkan GPUとドライバーを搭載したWindows
+  - Vulkan 1.3
+  - `VK_EXT_shader_object`
+  - `VK_KHR_push_descriptor`
+  - Vulkan 1.3の`synchronization2`および`dynamicRendering`機能
+- Vulkan loaderライブラリとヘッダー、および`glslc`を含むVulkan SDK
 - PowerShell
 - CMake 3.24以降
 - C++20対応コンパイラ
 
 トップレベルのCMake設定が自動的にC++20を選択するため、ビルド時に
 C++標準の追加フラグを指定する必要はありません。
+
+CMakeは`find_package(Vulkan REQUIRED COMPONENTS glslc)`でSDKを検出します。
+通常のVulkan SDKインストールで設定される`VULKAN_SDK`をCMakeが利用できます。
+SDKを自動取得する処理はありません。
 
 入力画像は両方ともPNG形式で、幅と高さが一致している必要があります。
 
@@ -32,6 +42,15 @@ C++標準の追加フラグを指定する必要はありません。
 build\src_gpu\Release\dssim-WebGPU.exe
 ```
 
+ルートのCMake設定は従来のconfigureコマンドとの互換性を維持し、
+GPUターゲットの定義を`src_gpu/CMakeLists.txt`へ委譲します。ビルド時に
+`glslc`が`src_gpu/shaders`のGLSLコンピュートシェーダーをSPIR-Vへ
+コンパイルし、実行ファイルの隣へ配置します。
+
+```text
+build\src_gpu\Release\shaders\*.spv
+```
+
 ## 1ペアを比較する
 
 ```powershell
@@ -43,7 +62,7 @@ build\src_gpu\Release\dssim-WebGPU.exe
 標準出力にスコアと比較対象のパスが表示されます。
 
 ```text
-0.00328379    .\tests\laptop.q24.jpegli.jpg.png
+0.00328441    .\tests\laptop.q24.jpegli.jpg.png
 ```
 
 タイミングを表示するには `--profiling` を追加します。
@@ -81,16 +100,16 @@ Get-Content .\tests\test_pairs.txt |
     & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling
 ```
 
-`--stdin-pairs` ではWebGPUデバイス、シェーダーモジュール、レイアウト、
-PSOをプロセス内で一度だけ作成し、すべてのペアで再利用します。画像解像度は
-uniformバッファとディスパッチ数で指定されるため、解像度が異なってもPSOを
-作り直す必要はありません。
+`--stdin-pairs` ではVulkan instanceとdeviceを作成し、SPIR-Vを読み込んで
+shader objectをプロセス内で一度だけ作成し、すべてのペアで再利用します。
+画像解像度はpush constantsとディスパッチ数で指定されるため、解像度が
+異なってもshader objectを作り直す必要はありません。
 
 `--stdin-pairs` は `--out` および `--debug-dump-dir` と同時には使えません。
 
 ## スコア回帰の自動確認
 
-回帰チェッカーは、WebGPU版のスコアをPATH上から解決したオリジナルの
+回帰チェッカーは、Vulkan版のスコアをPATH上から解決したオリジナルの
 `dssim.exe` と比較します。
 
 ```powershell
@@ -106,7 +125,7 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 回帰チェッカーは次の処理を行います。
 
 - `tests/test_pairs.txt` の全ペアを読み込む
-- WebGPU版を1つの `--stdin-pairs` セッションで実行する
+- Vulkan版を1つの `--stdin-pairs` セッションで実行する
 - 各ペアについてオリジナルの `dssim.exe` を実行する
 - 同一画像比較では `0.00000000` を要求する
 - その他の比較では相対誤差1%未満を要求する
@@ -127,23 +146,25 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 ## プロファイリング出力
 
 `--profiling` を指定すると、互いに重複しないwall-clock時間区分と、
-独立したWebGPU Timestamp Query結果がミリ秒単位で表示されます。
+独立したVulkan timestamp query結果がミリ秒単位で表示されます。timestamp
+query結果は、選択したcompute queueが対応している場合にのみ取得します。
 
 セッション初期化:
 
-- `session_init_pipeline_setup_ms`: シェーダー、Pipeline Layout、PSOの作成
+- `session_init_pipeline_setup_ms`: pipeline layoutとshader objectの作成
 - `session_init_resource_prep_ms`: セッション単位のリソース準備
 - `session_init_gpu_submit_wait_ms`: セッション単位のGPU送信・待機
-- `session_init_gpu_timestamp_ms`: セッション単位のGPU Timestamp Query時間
+- `session_init_gpu_timestamp_ms`: セッション単位のVulkan timestamp query時間
 - `session_init_cpu_postprocess_ms`: セッション単位のCPU後処理
 - `session_init_other_ms`: 上記以外のセッション初期化
 
 各比較:
 
-- `pipeline_setup_ms`: 比較単位のシェーダーとパイプライン準備
-- `resource_prep_ms`: バッファ作成、アップロード、Bind Group作成
-- `gpu_submit_wait_ms`: ディスパッチ、サブミット、readback/map待機のCPU wall時間
-- `gpu_timestamp_ms`: WebGPU Timestamp Queryで測定した実GPU実行時間
+- `pipeline_setup_ms`: 比較単位のシェーダー準備
+- `resource_prep_ms`: バッファ作成、アップロード、resource binding準備
+- `gpu_submit_wait_ms`: コマンド記録、サブミット、readback待機のCPU wall時間
+- `gpu_timestamp_ms`: Vulkan timestamp queryで測定した実GPU実行時間
+  （対応queueでのみ取得）
 - `cpu_postprocess_ms`: CPU側のスコア集計
 - `other_ms`: 色変換、画像ピラミッド生成など、デコード完了後の未分類処理
 
@@ -167,21 +188,26 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 
 `dispatch_and_submit_ms` はCPU側のコマンド構築・送信時間であり、
 純粋なシェーダー実行時間ではありません。`readback_ms` にはGPU完了待ちと
-マッピング待ちが含まれます。CPUとGPUは非同期に重なるため、
+host readback時間が含まれます。CPUとGPUは非同期に重なるため、
 `gpu_timestamp_ms` はwall-clock時間区分の合計には含まれません。
 2つのscale別post-process項目も、並列集計時には互いに重なる独立時間です。
-プロファイリングにはWebGPU `TimestampQuery` feature対応adapterが必要です。
+JSONのfield名は互換性のため維持しています。shader objectを使うため、
+`create_pso_ms`と`create_bind_group_ms`は0になる想定です。shader objectと
+pipeline layoutの処理は、対応する既存bucketへ計上します。timestamp queryは
+任意機能であり、queueが非対応でも比較処理とwall-clock profilingは動作します。
 
 ## 現在の高速化設計
 
-- PSOはプロセス内で一度だけ作成し、すべての解像度で再利用する
-- stageバッファとBind Groupは、それまでに処理した最大画像まで拡張し、
-  各スケールと後続ペアで再利用する
+- shader objectはプロセス内で一度だけ作成し、すべての解像度で再利用する
+- stageバッファは、それまでに処理した最大画像まで拡張し、各スケールと
+  後続ペアで再利用する
+- push descriptorによりdescriptor poolとdescriptor setの割り当てを省く
 - デバッグ統計用リソースは通常のベンチマーク経路とは別にキャッシュする
 - sRGBからlinearへの変換には256要素のルックアップテーブルを使用する
-- 2枚の入力画像を並列に色変換・縮小する
-- CPU画素変換と画像ピラミッド生成は、すべての画像サイズで同じ並列経路を
-  使用し、小画像専用のフォールバックを持たない
+- 通常経路では2枚の入力をGPUで変換し、CPUへの途中round-tripなしで全scaleの
+  画像ピラミッドを構築する
+- デバッグ経路では中間scaleデータを保持・出力できるよう、CPUで並列に画素変換と
+  画像ピラミッド生成を行う
 - 通常実行ではSSIMマップだけをreadbackする
 
 ## 最適化とスコアの方針
@@ -192,26 +218,30 @@ uniformバッファとディスパッチ数で指定されるため、解像度�
 - その他のペアは `dssim.exe` に対する相対誤差1%未満を維持する
 - 浮動小数点精度や代数変形は、回帰チェックの許容範囲内でのみ変更できる
 - blur weightおよびSSIM定数は変更しない
-- シェーダーは `@workgroup_size(16, 16, 1)` の2次元ディスパッチを維持し、
-  ディスパッチ数を `(ceil(width / 16), ceil(height / 16), 1)` とする
+- シェーダーはGLSL
+  `layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;`の
+  2次元ディスパッチを維持し、ディスパッチ数を
+  `(ceil(width / 16), ceil(height / 16), 1)`とする
 
-## Dawnのセットアップ
+## Vulkan SDKとシェーダー
 
-Dawnが存在しない場合、CMakeは `tools/install_dawn.ps1` を自動実行します。
-このスクリプトは `third_party/depot_tools` を準備し、Dawnを
-`third_party/dawn` へ取得して、必要なDawnライブラリをビルドします。
-
-自動インストールを無効にする場合:
-
-```powershell
-& cmake -S . -B build -DDSSIM_AUTO_INSTALL_DAWN=OFF
-```
-
-WebGPUターゲット自体を無効にする場合:
+configureの前にVulkan SDKをインストールしてください。ビルドにはSDKの
+loaderライブラリ、ヘッダー、`glslc`が必要で、いずれかが見つからない場合は
+configureが明確なエラーで終了します。PowerShellからシェーダーコンパイラを
+確認できます。
 
 ```powershell
-& cmake -S . -B build -DDSSIM_ENABLE_DAWN_SAMPLE=OFF
+& glslc --version
 ```
+
+ビルド時に次のGLSLコンピュートシェーダーをSPIR-Vへコンパイルします。
+アプリケーション起動時のシェーダーコンパイルは行いません。
+
+- `rgba8_to_linear.comp`
+- `downsample_2x2.comp`
+- `lab_preprocess.comp`
+- `stage0_absdiff.comp`
+- `stage0_score.comp`
 
 アルゴリズムの詳細を調べるための参照ソースは `src_reference/` に残しています。
 自動回帰では、意図的にPATH上から選択された `dssim.exe` を使用します。

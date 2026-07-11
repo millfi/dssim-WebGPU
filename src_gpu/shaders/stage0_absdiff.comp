@@ -1,0 +1,113 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Input1Buffer {
+    vec4 values[];
+} in1;
+
+layout(std430, set = 0, binding = 1) readonly buffer Input2Buffer {
+    vec4 values[];
+} in2;
+
+layout(std430, set = 0, binding = 2) writeonly buffer OutputSsimBuffer {
+    float values[];
+} out_ssim;
+
+layout(std430, set = 0, binding = 3) writeonly buffer OutputMu1Buffer {
+    float values[];
+} out_mu1;
+
+layout(std430, set = 0, binding = 4) writeonly buffer OutputMu2Buffer {
+    float values[];
+} out_mu2;
+
+layout(std430, set = 0, binding = 5) writeonly buffer OutputVar1Buffer {
+    float values[];
+} out_var1;
+
+layout(std430, set = 0, binding = 6) writeonly buffer OutputVar2Buffer {
+    float values[];
+} out_var2;
+
+layout(std430, set = 0, binding = 7) writeonly buffer OutputCov12Buffer {
+    float values[];
+} out_cov12;
+
+layout(push_constant) uniform Params {
+    uint len;
+    uint width;
+    uint height;
+    uint qscale;
+} params;
+
+const float gaussian_weights[25] = float[25](
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.032123, 0.079586, 0.113540, 0.079586, 0.032123,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088
+);
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    uint i = gid.y * params.width + gid.x;
+    int x = int(gid.x);
+    int y = int(gid.y);
+    int max_x = int(params.width) - 1;
+    int max_y = int(params.height) - 1;
+
+    vec3 sum1 = vec3(0.0, 0.0, 0.0);
+    vec3 sum2 = vec3(0.0, 0.0, 0.0);
+    vec3 sumsq1 = vec3(0.0, 0.0, 0.0);
+    vec3 sumsq2 = vec3(0.0, 0.0, 0.0);
+    vec3 sum12 = vec3(0.0, 0.0, 0.0);
+
+    for (int dy = -2; dy <= 2; dy = dy + 1) {
+        for (int dx = -2; dx <= 2; dx = dx + 1) {
+            int nx = clamp(x + dx, 0, max_x);
+            int ny = clamp(y + dy, 0, max_y);
+            uint ni = uint(ny) * params.width + uint(nx);
+            float w = gaussian_weights[(dy + 2) * 5 + dx + 2];
+
+            vec3 lab1 = in1.values[ni].xyz;
+            vec3 lab2 = in2.values[ni].xyz;
+
+            sum1 = sum1 + w * lab1;
+            sum2 = sum2 + w * lab2;
+            sumsq1 = sumsq1 + w * lab1 * lab1;
+            sumsq2 = sumsq2 + w * lab2 * lab2;
+            sum12 = sum12 + w * lab1 * lab2;
+        }
+    }
+
+    vec3 mu1 = sum1;
+    vec3 mu2 = sum2;
+    vec3 var1 = sumsq1 - mu1 * mu1;
+    vec3 var2 = sumsq2 - mu2 * mu2;
+    vec3 cov12 = sum12 - mu1 * mu2;
+
+    float mu1_sq = (mu1.x * mu1.x + mu1.y * mu1.y + mu1.z * mu1.z) / 3.0;
+    float mu2_sq = (mu2.x * mu2.x + mu2.y * mu2.y + mu2.z * mu2.z) / 3.0;
+    float mu1_mu2 = (mu1.x * mu2.x + mu1.y * mu2.y + mu1.z * mu2.z) / 3.0;
+    float sigma1_sq = (var1.x + var1.y + var1.z) / 3.0;
+    float sigma2_sq = (var2.x + var2.y + var2.z) / 3.0;
+    float sigma12 = (cov12.x + cov12.y + cov12.z) / 3.0;
+
+    float c1 = 0.01 * 0.01;
+    float c2 = 0.03 * 0.03;
+    float numer = (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2);
+    float denom = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2);
+    float ssim = numer / denom;
+
+    out_ssim.values[i] = ssim;
+    out_mu1.values[i] = mu1.x;
+    out_mu2.values[i] = mu2.x;
+    out_var1.values[i] = var1.x;
+    out_var2.values[i] = var2.x;
+    out_cov12.values[i] = cov12.x;
+}

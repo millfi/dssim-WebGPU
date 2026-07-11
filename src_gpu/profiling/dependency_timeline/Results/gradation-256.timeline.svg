@@ -22,7 +22,7 @@
 
   <rect width="1160" height="430" fill="#ffffff"/>
   <text x="24" y="34" class="title">RGBA8 pair comparison dependency timeline</text>
-  <text x="24" y="55" class="subtitle">tests/gradation.png → tests/gradation-256.png · durations from profiling JSON · 2026-07-05</text>
+  <text x="24" y="55" class="subtitle">tests/gradation.png → tests/gradation-256.png · Vulkan durations from profiling JSON · 2026-07-11</text>
 
   <!-- Plot origin x=190; scale=6 px/ms. -->
   <g>
@@ -45,51 +45,49 @@
   </g>
 
   <!-- Known overlap windows. GPU placement inside submit/wait is schematic. -->
-  <rect x="772" y="82" width="210" height="145" rx="5" fill="#eeca3b" opacity="0.10"/>
-  <text x="877" y="94" text-anchor="middle" class="tick">CPU submit/wait ↔ GPU overlap</text>
-  <rect x="982" y="252" width="16" height="103" rx="4" fill="#54a24b" opacity="0.13"/>
+  <rect x="778" y="82" width="108" height="145" rx="5" fill="#eeca3b" opacity="0.10"/>
+  <text x="832" y="94" text-anchor="middle" class="tick">CPU submit/wait ↔ GPU overlap</text>
+  <rect x="886" y="252" width="17" height="103" rx="4" fill="#54a24b" opacity="0.13"/>
 
   <text x="24" y="130" class="lane">CPU wall-clock (MECE)</text>
-  <rect x="190" y="105" width="294" height="42" rx="4" fill="#4c78a8"/>
-  <text x="337" y="125" text-anchor="middle" class="bar-label">create buffers</text>
-  <text x="337" y="140" text-anchor="middle" class="bar-label">49 ms</text>
+  <rect x="190" y="105" width="558" height="42" rx="4" fill="#4c78a8"/>
+  <text x="469" y="125" text-anchor="middle" class="bar-label">create arenas</text>
+  <text x="469" y="140" text-anchor="middle" class="bar-label">93 ms</text>
 
-  <rect x="484" y="105" width="288" height="42" rx="4" fill="#72b7b2"/>
-  <text x="628" y="125" text-anchor="middle" class="bar-label">upload inputs</text>
-  <text x="628" y="140" text-anchor="middle" class="bar-label">48 ms</text>
+  <rect x="748" y="105" width="30" height="42" rx="4" fill="#72b7b2"/>
+  <text x="763" y="164" text-anchor="middle" class="duration">upload 5 ms</text>
 
-  <rect x="772" y="105" width="126" height="42" rx="4" fill="#f58518"/>
-  <text x="835" y="125" text-anchor="middle" class="bar-label">encode + submit</text>
-  <text x="835" y="140" text-anchor="middle" class="bar-label">21 ms</text>
+  <rect x="778" y="105" width="18" height="42" rx="4" fill="#f58518"/>
+  <text x="787" y="177" text-anchor="middle" class="duration">submit 3 ms</text>
 
-  <rect x="898" y="105" width="84" height="42" rx="4" fill="#e45756"/>
-  <text x="940" y="125" text-anchor="middle" class="bar-label">readback</text>
-  <text x="940" y="140" text-anchor="middle" class="bar-label">14 ms</text>
+  <rect x="796" y="105" width="90" height="42" rx="4" fill="#e45756"/>
+  <text x="841" y="125" text-anchor="middle" class="bar-label">readback</text>
+  <text x="841" y="140" text-anchor="middle" class="bar-label">15 ms</text>
 
-  <rect x="982" y="105" width="58" height="42" rx="4" fill="#54a24b"/>
-  <text x="1011" y="125" text-anchor="middle" class="bar-label">post</text>
-  <text x="1011" y="140" text-anchor="middle" class="bar-label">9 ms</text>
+  <rect x="886" y="105" width="48" height="42" rx="4" fill="#54a24b"/>
+  <text x="910" y="125" text-anchor="middle" class="bar-label">post</text>
+  <text x="910" y="140" text-anchor="middle" class="bar-label">8 ms</text>
 
-  <rect x="1040" y="105" width="18" height="42" rx="4" fill="#b279a2"/>
-  <text x="1049" y="164" text-anchor="middle" class="duration">other 3 ms</text>
+  <rect x="934" y="105" width="6" height="42" rx="3" fill="#b279a2"/>
+  <text x="950" y="164" text-anchor="middle" class="duration">other 1 ms</text>
 
   <text x="24" y="215" class="lane">GPU Timestamp Query</text>
-  <rect x="838" y="180" width="105.4" height="42" rx="4" fill="url(#gpuHatch)" stroke="#b58d00" stroke-dasharray="4 3"/>
-  <text x="890.7" y="200" text-anchor="middle" class="bar-label">GPU execution</text>
-  <text x="890.7" y="215" text-anchor="middle" class="bar-label">17.564 ms</text>
-  <path d="M 772 147 L 772 169 L 838 169 L 838 180" class="dependency"/>
-  <path d="M 943.4 222 L 943.4 242 L 982 242 L 982 252" class="dependency"/>
-  <text x="960" y="233" class="tick">rejoin before postprocess</text>
+  <rect x="802" y="180" width="60.9" height="42" rx="4" fill="url(#gpuHatch)" stroke="#b58d00" stroke-dasharray="4 3"/>
+  <text x="832.5" y="200" text-anchor="middle" class="bar-label">GPU execution</text>
+  <text x="832.5" y="215" text-anchor="middle" class="bar-label">10.146 ms</text>
+  <path d="M 778 147 L 778 169 L 802 169 L 802 180" class="dependency"/>
+  <path d="M 862.9 222 L 862.9 242 L 886 242 L 886 252" class="dependency"/>
+  <text x="872" y="233" class="tick">rejoin before postprocess</text>
 
   <text x="24" y="290" class="lane">CPU postprocess: main</text>
-  <rect x="982" y="262" width="57.9" height="34" rx="4" fill="#54a24b"/>
-  <text x="1011" y="283" text-anchor="middle" class="bar-label">scale 0</text>
-  <text x="1046" y="283" class="duration">9.652 ms</text>
+  <rect x="886" y="262" width="49.7" height="34" rx="4" fill="#54a24b"/>
+  <text x="911" y="283" text-anchor="middle" class="bar-label">scale 0</text>
+  <text x="942" y="283" class="duration">8.287 ms</text>
 
   <text x="24" y="345" class="lane">CPU postprocess: worker</text>
-  <rect x="982" y="317" width="15.4" height="34" rx="4" fill="#9d755d"/>
-  <text x="1004" y="340" class="duration">scales 1–4 · 2.571 ms</text>
-  <path d="M 982 296 L 972 306 L 982 317" class="dependency"/>
+  <rect x="886" y="317" width="16.8" height="34" rx="4" fill="#9d755d"/>
+  <text x="910" y="340" class="duration">scales 1–4 · 2.799 ms</text>
+  <path d="M 886 296 L 876 306 L 886 317" class="dependency"/>
 
-  <text x="24" y="406" class="subtitle">Solid CPU bars use wall-clock buckets. Hatched GPU duration is exact; horizontal placement is schematic because WebGPU Timestamp Query does not calibrate to the CPU clock.</text>
+  <text x="24" y="406" class="subtitle">Solid CPU bars use wall-clock buckets. Hatched Vulkan GPU duration is exact; horizontal placement is schematic because this profiler does not calibrate GPU and CPU clocks.</text>
 </svg>

@@ -1,0 +1,129 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InputPixelsBuffer {
+    vec4 values[];
+} in_pixels;
+
+layout(std430, set = 0, binding = 1) writeonly buffer OutputLabBuffer {
+    vec4 values[];
+} out_lab;
+
+layout(push_constant) uniform Params {
+    uint len;
+    uint width;
+    uint height;
+    uint qscale;
+} params;
+
+const uint workgroup_width = 16u;
+const uint tile_radius = 2u;
+const uint tile_width = workgroup_width + tile_radius * 2u;
+const uint tile_len = tile_width * tile_width;
+
+shared vec4 tile_lab[tile_len];
+
+float cbrt_poly(float x) {
+    float y = (-0.5 * x + 1.51) * x + 0.2;
+    float y3 = y * y * y;
+    y = y * (y3 + 2.0 * x) / (2.0 * y3 + x);
+    y3 = y * y * y;
+    y = y * (y3 + 2.0 * x) / (2.0 * y3 + x);
+    return y;
+}
+
+vec3 lab_from_rgbaplu(vec4 px, int x, int y) {
+    float r = px.x;
+    float g = px.y;
+    float b = px.z;
+    float a = px.w;
+
+    uint n = uint((x + 11) ^ (y + 11));
+    if (a < 255.0) {
+        float one_minus_a = 1.0 - a;
+        if ((n & 16u) != 0u) {
+            r = r + one_minus_a;
+        }
+        if ((n & 8u) != 0u) {
+            g = g + one_minus_a;
+        }
+        if ((n & 32u) != 0u) {
+            b = b + one_minus_a;
+        }
+    }
+
+    float d65x = 0.9505;
+    float d65y = 1.0;
+    float d65z = 1.089;
+    float fx = r * (0.4124 / d65x) + g * (0.3576 / d65x) + b * (0.1805 / d65x);
+    float fy = r * (0.2126 / d65y) + g * (0.7152 / d65y) + b * (0.0722 / d65y);
+    float fz = r * (0.0193 / d65z) + g * (0.1192 / d65z) + b * (0.9505 / d65z);
+
+    float epsilon = 216.0 / 24389.0;
+    float k = 24389.0 / (27.0 * 116.0);
+    float X = fx > epsilon ? cbrt_poly(fx) - 16.0 / 116.0 : k * fx;
+    float Y = fy > epsilon ? cbrt_poly(fy) - 16.0 / 116.0 : k * fy;
+    float Z = fz > epsilon ? cbrt_poly(fz) - 16.0 / 116.0 : k * fz;
+
+    float l = Y * 1.05;
+    float a2 = (500.0 / 220.0) * (X - Y) + (86.2 / 220.0);
+    float b2 = (200.0 / 220.0) * (Y - Z) + (107.9 / 220.0);
+    return vec3(l, a2, b2);
+}
+
+const float gaussian_weights[25] = float[25](
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.032123, 0.079586, 0.113540, 0.079586, 0.032123,
+    0.022516, 0.055786, 0.079586, 0.055786, 0.022516,
+    0.009088, 0.022516, 0.032123, 0.022516, 0.009088
+);
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    uvec3 lid = gl_LocalInvocationID;
+    uint local_index = gl_LocalInvocationIndex;
+    uvec3 workgroup_id = gl_WorkGroupID;
+
+    int max_x = int(params.width) - 1;
+    int max_y = int(params.height) - 1;
+    int tile_origin_x = int(workgroup_id.x * workgroup_width) - int(tile_radius);
+    int tile_origin_y = int(workgroup_id.y * workgroup_width) - int(tile_radius);
+
+    for (
+        uint tile_i = local_index;
+        tile_i < tile_len;
+        tile_i = tile_i + workgroup_width * workgroup_width
+    ) {
+        uint tile_x = tile_i % tile_width;
+        uint tile_y = tile_i / tile_width;
+        int x = clamp(tile_origin_x + int(tile_x), 0, max_x);
+        int y = clamp(tile_origin_y + int(tile_y), 0, max_y);
+        uint input_i = uint(y) * params.width + uint(x);
+        tile_lab[tile_i] = vec4(lab_from_rgbaplu(in_pixels.values[input_i], x, y), 0.0);
+    }
+    barrier();
+
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    uint i = gid.y * params.width + gid.x;
+    uint center_i = (lid.y + tile_radius) * tile_width + lid.x + tile_radius;
+    vec3 center = tile_lab[center_i].xyz;
+
+    float pre_a = 0.0;
+    float pre_b = 0.0;
+    for (int dy = -2; dy <= 2; dy = dy + 1) {
+        for (int dx = -2; dx <= 2; dx = dx + 1) {
+            float w = gaussian_weights[(dy + 2) * 5 + dx + 2];
+            uint tile_i = uint(int(center_i) + dy * int(tile_width) + dx);
+            vec3 lab = tile_lab[tile_i].xyz;
+            pre_a = pre_a + w * lab.y;
+            pre_b = pre_b + w * lab.z;
+        }
+    }
+
+    out_lab.values[i] = vec4(center.x, pre_a, pre_b, 0.0);
+}

@@ -14,14 +14,14 @@
 `gradation-256.timeline.svg` renders the measured dependencies and highlights
 two overlaps:
 
-- WebGPU Timestamp Query execution overlaps CPU-side submit/readback waiting.
+- Vulkan timestamp-query execution overlaps CPU-side submit/readback waiting.
 - Scale 1-4 CPU aggregation runs on a worker while scale 0 is aggregated on
   the main thread.
 
-The Timestamp Query duration is exact, but WebGPU does not expose calibration
-between the GPU timestamp clock and the CPU clock. Its horizontal placement
-inside the submit/wait window is therefore schematic. CPU wall-clock spans and
-all displayed durations are the measured values.
+The timestamp-query duration is exact, but this profiler does not calibrate the
+GPU timestamp clock against the CPU clock. Its horizontal placement inside the
+submit/wait window is therefore schematic. CPU wall-clock spans and all
+displayed durations are the measured values.
 
 Validate the timeline source with the bundled parser:
 

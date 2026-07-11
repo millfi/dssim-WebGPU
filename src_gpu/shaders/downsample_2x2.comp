@@ -1,0 +1,46 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InputPixelsBuffer {
+    vec4 values[];
+} in_pixels;
+
+layout(std430, set = 0, binding = 1) writeonly buffer OutputPixelsBuffer {
+    vec4 values[];
+} out_pixels;
+
+layout(push_constant) uniform Params {
+    uint in_width;
+    uint in_height;
+    uint out_width;
+    uint out_height;
+} params;
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    if (gid.x >= params.out_width || gid.y >= params.out_height) {
+        return;
+    }
+
+    uint i = gid.y * params.out_width + gid.x;
+    uint ox = gid.x;
+    uint oy = gid.y;
+    int sx0 = int(ox * 2u);
+    int sy0 = int(oy * 2u);
+    int max_x = int(params.in_width) - 1;
+    int max_y = int(params.in_height) - 1;
+
+    vec4 sum = vec4(0.0, 0.0, 0.0, 0.0);
+
+    for (int dy = 0; dy < 2; dy = dy + 1) {
+        for (int dx = 0; dx < 2; dx = dx + 1) {
+            uint sx = uint(clamp(sx0 + dx, 0, max_x));
+            uint sy = uint(clamp(sy0 + dy, 0, max_y));
+            uint si = sy * params.in_width + sx;
+            sum = sum + in_pixels.values[si];
+        }
+    }
+
+    out_pixels.values[i] = sum * 0.25;
+}

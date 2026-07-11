@@ -2,10 +2,11 @@ dssim
 target/
 build*/
 out/
+tests/out_*.json
+# Legacy local toolchain checkouts are not part of the Vulkan build.
 third_party/dawn/
 third_party/depot_tools/
 third_party/.cipd/
 third_party/ffmpeg-build/
 third_party/ffmpeg-*/
 build_nothirdparty/
-build_without_dawn/
