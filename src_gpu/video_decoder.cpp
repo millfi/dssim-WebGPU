@@ -35,6 +35,43 @@ std::string AvErrorString(int errorCode) {
     return std::string(buffer.data());
 }
 
+AVCodecID ProbeVideoCodec(const std::string& path) {
+    AVFormatContext* format = nullptr;
+    try {
+        CheckAv("avformat_open_input", avformat_open_input(&format, path.c_str(), nullptr, nullptr));
+        CheckAv("avformat_find_stream_info", avformat_find_stream_info(format, nullptr));
+        const int streamIndex = av_find_best_stream(
+            format,
+            AVMEDIA_TYPE_VIDEO,
+            -1,
+            -1,
+            nullptr,
+            0);
+        CheckAv("av_find_best_stream", streamIndex);
+        const AVCodecID codecId = format->streams[streamIndex]->codecpar->codec_id;
+        avformat_close_input(&format);
+        return codecId;
+    } catch (...) {
+        avformat_close_input(&format);
+        throw;
+    }
+}
+
+VkVideoCodecOperationFlagsKHR VulkanVideoCodecOperationForCodec(AVCodecID codecId) {
+    switch (codecId) {
+        case AV_CODEC_ID_H264:
+            return VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+        case AV_CODEC_ID_HEVC:
+            return VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+        case AV_CODEC_ID_VP9:
+            return VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR;
+        case AV_CODEC_ID_AV1:
+            return VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
+        default:
+            return 0;
+    }
+}
+
 bool IsVideoPath(const std::string& path) {
     const std::size_t dot = path.find_last_of('.');
     if (dot == std::string::npos) {

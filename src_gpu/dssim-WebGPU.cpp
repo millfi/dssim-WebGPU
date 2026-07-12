@@ -242,6 +242,9 @@ struct GpuSession {
     std::uint32_t videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     VkQueueFlags videoDecodeQueueFlags = 0;
     VkVideoCodecOperationFlagsKHR videoDecodeCaps = 0;
+    std::uint32_t videoDecodeQueueFamilyIndexSecondary = VK_QUEUE_FAMILY_IGNORED;
+    VkQueueFlags videoDecodeQueueFlagsSecondary = 0;
+    VkVideoCodecOperationFlagsKHR videoDecodeCapsSecondary = 0;
     bool videoSupported = false;
     std::vector<const char*> videoDeviceExtensions;
     VkPhysicalDeviceProperties physicalDeviceProperties{};
@@ -2395,6 +2398,10 @@ struct PhysicalDeviceSelection {
     VkQueueFamilyProperties queueFamilyProperties{};
     std::uint32_t videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     VkQueueFamilyProperties videoDecodeQueueProperties{};
+    VkVideoCodecOperationFlagsKHR videoDecodeCaps = 0;
+    std::uint32_t videoDecodeQueueFamilyIndexSecondary = VK_QUEUE_FAMILY_IGNORED;
+    VkQueueFamilyProperties videoDecodeQueuePropertiesSecondary{};
+    VkVideoCodecOperationFlagsKHR videoDecodeCapsSecondary = 0;
     VkPhysicalDeviceProperties properties{};
 };
 
@@ -2516,15 +2523,36 @@ PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
          HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME) ||
          HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME))) {
         std::uint32_t queueCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(best.physicalDevice, &queueCount, nullptr);
-        std::vector<VkQueueFamilyProperties> queues(queueCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(best.physicalDevice, &queueCount, queues.data());
+        vkGetPhysicalDeviceQueueFamilyProperties2(best.physicalDevice, &queueCount, nullptr);
+        std::vector<VkQueueFamilyProperties2> queues(queueCount);
+        std::vector<VkQueueFamilyVideoPropertiesKHR> videoProperties(queueCount);
         for (std::uint32_t queueIndex = 0; queueIndex < queueCount; ++queueIndex) {
-            if (queues[queueIndex].queueCount != 0 &&
-                (queues[queueIndex].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) != 0) {
+            queues[queueIndex].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+            videoProperties[queueIndex].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR;
+            queues[queueIndex].pNext = &videoProperties[queueIndex];
+        }
+        vkGetPhysicalDeviceQueueFamilyProperties2(
+            best.physicalDevice,
+            &queueCount,
+            queues.data());
+        best.videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        best.videoDecodeQueueFamilyIndexSecondary = VK_QUEUE_FAMILY_IGNORED;
+        for (std::uint32_t queueIndex = 0; queueIndex < queueCount; ++queueIndex) {
+            if (queues[queueIndex].queueFamilyProperties.queueCount == 0 ||
+                (queues[queueIndex].queueFamilyProperties.queueFlags &
+                 VK_QUEUE_VIDEO_DECODE_BIT_KHR) == 0 ||
+                videoProperties[queueIndex].videoCodecOperations == 0) {
+                continue;
+            }
+            if (best.videoDecodeQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED) {
                 best.videoDecodeQueueFamilyIndex = queueIndex;
-                best.videoDecodeQueueProperties = queues[queueIndex];
-                break;
+                best.videoDecodeQueueProperties = queues[queueIndex].queueFamilyProperties;
+                best.videoDecodeCaps = videoProperties[queueIndex].videoCodecOperations;
+            } else if (best.videoDecodeQueueFamilyIndexSecondary == VK_QUEUE_FAMILY_IGNORED) {
+                best.videoDecodeQueueFamilyIndexSecondary = queueIndex;
+                best.videoDecodeQueuePropertiesSecondary =
+                    queues[queueIndex].queueFamilyProperties;
+                best.videoDecodeCapsSecondary = videoProperties[queueIndex].videoCodecOperations;
             }
         }
     }
@@ -2668,19 +2696,36 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     session->adapterName = selection.properties.deviceName;
     session->videoDecodeQueueFamilyIndex = selection.videoDecodeQueueFamilyIndex;
     session->videoDecodeQueueFlags = selection.videoDecodeQueueProperties.queueFlags;
-    session->videoDecodeCaps = 0;
-    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME)) {
-        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
-    }
-    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME)) {
-        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
-    }
-    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME)) {
-        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR;
-    }
-    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME)) {
-        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
-    }
+    const auto maskEnabledVideoDecodeExtensions = [&](VkVideoCodecOperationFlagsKHR caps) {
+        if (!HasDeviceExtension(
+                session->physicalDevice,
+                VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME)) {
+            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+        }
+        if (!HasDeviceExtension(
+                session->physicalDevice,
+                VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME)) {
+            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+        }
+        if (!HasDeviceExtension(
+                session->physicalDevice,
+                VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME)) {
+            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR;
+        }
+        if (!HasDeviceExtension(
+                session->physicalDevice,
+                VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME)) {
+            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
+        }
+        return caps;
+    };
+    session->videoDecodeCaps = maskEnabledVideoDecodeExtensions(selection.videoDecodeCaps);
+    session->videoDecodeQueueFamilyIndexSecondary =
+        selection.videoDecodeQueueFamilyIndexSecondary;
+    session->videoDecodeQueueFlagsSecondary =
+        selection.videoDecodeQueuePropertiesSecondary.queueFlags;
+    session->videoDecodeCapsSecondary =
+        maskEnabledVideoDecodeExtensions(selection.videoDecodeCapsSecondary);
     session->videoSupported =
         selection.videoDecodeQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED &&
         session->videoDecodeCaps != 0;
@@ -2703,13 +2748,24 @@ std::unique_ptr<GpuSession> CreateGpuSession(
         .queueCount = 1,
         .pQueuePriorities = &queuePriority,
     };
-    std::array<VkDeviceQueueCreateInfo, 2> queueInfos = {computeQueueInfo, {}};
+    std::array<VkDeviceQueueCreateInfo, 3> queueInfos = {computeQueueInfo, {}, {}};
     std::uint32_t queueInfoCount = 1;
     if (session->videoSupported &&
         session->videoDecodeQueueFamilyIndex != session->queueFamilyIndex) {
         queueInfos[queueInfoCount++] = {
             .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
             .queueFamilyIndex = session->videoDecodeQueueFamilyIndex,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriority,
+        };
+    }
+    if (session->videoSupported &&
+        session->videoDecodeQueueFamilyIndexSecondary != VK_QUEUE_FAMILY_IGNORED &&
+        session->videoDecodeQueueFamilyIndexSecondary != session->queueFamilyIndex &&
+        session->videoDecodeQueueFamilyIndexSecondary != session->videoDecodeQueueFamilyIndex) {
+        queueInfos[queueInfoCount++] = {
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = session->videoDecodeQueueFamilyIndexSecondary,
             .queueCount = 1,
             .pQueuePriorities = &queuePriority,
         };
@@ -2721,16 +2777,18 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     if (session->videoSupported) {
         deviceExtensions.push_back(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME);
-        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) != 0) {
+        const VkVideoCodecOperationFlagsKHR allVideoDecodeCaps =
+            session->videoDecodeCaps | session->videoDecodeCapsSecondary;
+        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) != 0) {
             deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME);
         }
-        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) != 0) {
+        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) != 0) {
             deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME);
         }
-        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR) != 0) {
+        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR) != 0) {
             deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME);
         }
-        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) != 0) {
+        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) != 0) {
             deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME);
         }
         if (HasDeviceExtension(
@@ -3237,18 +3295,104 @@ void RunVideoComparison(
             "selected Vulkan device does not expose the Vulkan Video decode extensions/queue");
     }
 
-    const VulkanInteropContext interop = {
-        .instance = session.instance,
-        .physicalDevice = session.physicalDevice,
-        .device = session.device,
-        .computeQueueFamily = session.queueFamilyIndex,
-        .decodeQueueFamily = session.videoDecodeQueueFamilyIndex,
-        .computeQueueFlags = session.computeQueueFlags,
-        .decodeQueueFlags = session.videoDecodeQueueFlags,
-        .decodeVideoCaps = session.videoDecodeCaps,
-        .enabledDeviceExtensions = session.videoDeviceExtensions,
+    const std::array<AVCodecID, 2> codecIds = {
+        ProbeVideoCodec(request.image1.string()),
+        ProbeVideoCodec(request.image2.string()),
     };
-    const auto videoDevice = VulkanVideoDevice::Create(interop);
+    const std::array<VkVideoCodecOperationFlagsKHR, 2> codecOperations = {
+        VulkanVideoCodecOperationForCodec(codecIds[0]),
+        VulkanVideoCodecOperationForCodec(codecIds[1]),
+    };
+    if (codecOperations[0] == 0 || codecOperations[1] == 0) {
+        throw std::runtime_error(
+            "unsupported video codec; expected H.264, HEVC, VP9, or AV1");
+    }
+
+    const std::uint32_t primaryQueueFamily = session.videoDecodeQueueFamilyIndex;
+    const VkQueueFlags primaryQueueFlags = session.videoDecodeQueueFlags;
+    const VkVideoCodecOperationFlagsKHR primaryCaps = session.videoDecodeCaps;
+    const bool hasSecondaryQueue =
+        session.videoDecodeQueueFamilyIndexSecondary != VK_QUEUE_FAMILY_IGNORED &&
+        session.videoDecodeCapsSecondary != 0;
+    const std::uint32_t secondaryQueueFamily =
+        session.videoDecodeQueueFamilyIndexSecondary;
+    const VkQueueFlags secondaryQueueFlags = session.videoDecodeQueueFlagsSecondary;
+    const VkVideoCodecOperationFlagsKHR secondaryCaps = session.videoDecodeCapsSecondary;
+    const auto primarySupports = [&](std::size_t streamIndex) {
+        return (primaryCaps & codecOperations[streamIndex]) == codecOperations[streamIndex];
+    };
+    const auto secondarySupports = [&](std::size_t streamIndex) {
+        return hasSecondaryQueue &&
+               (secondaryCaps & codecOperations[streamIndex]) == codecOperations[streamIndex];
+    };
+
+    std::array<std::uint32_t, 2> selectedQueueFamilies = {
+        primaryQueueFamily,
+        primaryQueueFamily,
+    };
+    std::array<VkQueueFlags, 2> selectedQueueFlags = {
+        primaryQueueFlags,
+        primaryQueueFlags,
+    };
+    std::array<VkVideoCodecOperationFlagsKHR, 2> selectedQueueCaps = {
+        primaryCaps,
+        primaryCaps,
+    };
+    const bool bothAv1 =
+        codecIds[0] == AV_CODEC_ID_AV1 && codecIds[1] == AV_CODEC_ID_AV1;
+    if (bothAv1) {
+        if (!primarySupports(0) || !primarySupports(1)) {
+            throw std::runtime_error("the selected primary Vulkan Video queue does not support both AV1 videos");
+        }
+    } else if (hasSecondaryQueue) {
+        // Prefer putting one stream on the secondary queue while keeping the
+        // other stream on the primary queue. This is a capability-based choice;
+        // no queue-family index is assumed to have a particular codec set.
+        std::size_t secondaryStream = 2;
+        if (primarySupports(0) && secondarySupports(1)) {
+            secondaryStream = 1;
+        } else if (secondarySupports(0) && primarySupports(1)) {
+            secondaryStream = 0;
+        }
+        if (secondaryStream < 2u) {
+            selectedQueueFamilies[secondaryStream] = secondaryQueueFamily;
+            selectedQueueFlags[secondaryStream] = secondaryQueueFlags;
+            selectedQueueCaps[secondaryStream] = secondaryCaps;
+        } else if (!primarySupports(0) || !primarySupports(1)) {
+            throw std::runtime_error(
+                "no compatible Vulkan Video queue-family assignment was found for the two codecs");
+        }
+    } else if (!primarySupports(0) || !primarySupports(1)) {
+        throw std::runtime_error(
+            "the available Vulkan Video queue-family does not support both codecs");
+    }
+
+    const auto makeVideoInterop = [&](std::size_t streamIndex) {
+        return VulkanInteropContext{
+            .instance = session.instance,
+            .physicalDevice = session.physicalDevice,
+            .device = session.device,
+            .computeQueueFamily = session.queueFamilyIndex,
+            .decodeQueueFamily = selectedQueueFamilies[streamIndex],
+            .computeQueueFlags = session.computeQueueFlags,
+            .decodeQueueFlags = selectedQueueFlags[streamIndex],
+            .decodeVideoCaps = selectedQueueCaps[streamIndex],
+            .enabledDeviceExtensions = session.videoDeviceExtensions,
+        };
+    };
+    const auto primaryVideoDevice = VulkanVideoDevice::Create(makeVideoInterop(0));
+    const auto secondaryVideoDevice =
+        selectedQueueFamilies[0] == selectedQueueFamilies[1]
+            ? primaryVideoDevice
+            : VulkanVideoDevice::Create(makeVideoInterop(1));
+    const std::array<std::shared_ptr<VulkanVideoDevice>, 2> videoDevices = {
+        primaryVideoDevice,
+        secondaryVideoDevice,
+    };
+    std::cerr << "[video] codec1=" << avcodec_get_name(codecIds[0])
+              << " decode_queue_family1=" << selectedQueueFamilies[0]
+              << " codec2=" << avcodec_get_name(codecIds[1])
+              << " decode_queue_family2=" << selectedQueueFamilies[1] << '\n';
 
     double totalScore = 0.0;
     std::size_t frameCount = 0;
@@ -3285,7 +3429,7 @@ void RunVideoComparison(
             }
             decodePipeline.condition.notify_all();
             VulkanVideoReader reader;
-            reader.Open(videoPaths[streamIndex], videoDevice);
+            reader.Open(videoPaths[streamIndex], videoDevices[streamIndex]);
 
             std::size_t frameNumber = 0;
             for (;;) {

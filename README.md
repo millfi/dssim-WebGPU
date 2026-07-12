@@ -274,6 +274,9 @@ in-flight frame-pair limit with `--pipeline-depth <N>`; the default is 3. `frame
 the same frame on the decode and comparison sides and is also used for ordering
 validation and CSV output.
 Each input video has its own dedicated FFmpeg decode thread.
+At startup, queue-family codec capabilities are queried and one stream is
+assigned to a different Vulkan Video queue family when possible. If both
+streams are AV1, they share the primary queue family.
 
 The build compiles these GLSL compute shaders to SPIR-V; shaders are not
 compiled at application startup:

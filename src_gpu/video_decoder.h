@@ -90,3 +90,5 @@ private:
 
 bool IsVideoPath(const std::string& path);
 std::string AvErrorString(int errorCode);
+AVCodecID ProbeVideoCodec(const std::string& path);
+VkVideoCodecOperationFlagsKHR VulkanVideoCodecOperationForCodec(AVCodecID codecId);
