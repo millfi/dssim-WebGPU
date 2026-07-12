@@ -34,10 +34,13 @@ function ConvertTo-BashPath([string]$Path) {
     return '/' + $Matches[1].ToLowerInvariant() + '/' + ($Matches[2] -replace '\\', '/')
 }
 
-$VsDevShell = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1'
+$VsDevShell = @(
+    'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1',
+    'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Launch-VsDevShell.ps1'
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if ($null -eq (Get-Command 'cl.exe' -CommandType Application -ErrorAction SilentlyContinue)) {
-    if (-not (Test-Path -LiteralPath $VsDevShell)) {
-        throw "cl.exe is not on PATH and the Visual Studio Developer PowerShell launcher was not found at $VsDevShell"
+    if ([string]::IsNullOrWhiteSpace($VsDevShell)) {
+        throw 'cl.exe is not on PATH and a Visual Studio Developer PowerShell launcher was not found.'
     }
     . $VsDevShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 }
@@ -82,6 +85,7 @@ if (-not (Test-Path -LiteralPath $SourceRoot)) {
 
 $SourceBashPath = ConvertTo-BashPath $SourceRoot
 $PrefixBashPath = ConvertTo-BashPath $Prefix
+$VulkanIncludeBashPath = ConvertTo-BashPath (Join-Path $env:VULKAN_SDK 'Include')
 $Parallelism = [Math]::Max(1, [Environment]::ProcessorCount)
 $LinkageArguments = if ($Linkage -eq 'Dynamic') {
     @('--enable-shared', '--disable-static')
@@ -89,29 +93,30 @@ $LinkageArguments = if ($Linkage -eq 'Dynamic') {
     @('--enable-static', '--disable-shared')
 }
 
-# The four enabled decoders are only retained because FFmpeg's D3D11VA paths
-# are attached to their codec parsers. src_reference rejects any non-D3D11
-# output frame at runtime, so software decoding is never accepted.
+# Keep only the containers, parsers, codecs, and Vulkan Video hwaccels needed
+# by dssim-WebGPU. The application consumes AV_PIX_FMT_VULKAN frames directly;
+# there is deliberately no swscale/libavfilter path in this development build.
 $ConfigureArguments = @(
     '--toolchain=msvc', '--arch=x86_64',
     "--prefix=$PrefixBashPath"
 ) + $LinkageArguments + @(
     '--disable-programs', '--disable-doc', '--disable-debug',
     '--disable-autodetect', '--disable-network', '--disable-avdevice', '--disable-avfilter',
-    '--disable-swresample', '--disable-encoders', '--disable-muxers',
+    '--disable-swresample', '--disable-swscale', '--disable-encoders', '--disable-muxers',
     '--disable-filters', '--disable-bsfs', '--disable-protocols', '--disable-indevs', '--disable-outdevs',
     '--disable-decoders', '--disable-demuxers', '--disable-parsers', '--disable-hwaccels', '--disable-asm',
-    '--enable-avutil', '--enable-avcodec', '--enable-avformat', '--enable-swscale',
+    '--enable-avutil', '--enable-avcodec', '--enable-avformat',
     '--enable-protocol=file', '--enable-demuxer=mov,matroska',
     '--enable-parser=h264,hevc,av1,vp9', '--enable-decoder=h264,hevc,av1,vp9',
-    '--enable-d3d11va',
+    '--enable-vulkan',
+    '--enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan,vp9_vulkan',
     # Rust's MSVC target uses the dynamic CRT. Match it in FFmpeg so the
     # FFmpeg objects do not introduce LIBCMT and cause LNK4098 at the final
     # executable link.
     # `-MD` is accepted by cl.exe and, unlike `/MD`, is not rewritten as an
     # MSYS2 path while it passes through bash.exe.
     '--extra-cflags=-MD',
-    '--enable-hwaccel=h264_d3d11va,hevc_d3d11va,av1_d3d11va,vp9_d3d11va,h264_d3d11va2,hevc_d3d11va2,av1_d3d11va2,vp9_d3d11va2'
+    "--extra-cflags=-I$VulkanIncludeBashPath"
 )
 
 $ConfigureLine = './configure ' + ($ConfigureArguments -join ' ')
@@ -137,7 +142,7 @@ if ($Linkage -eq 'Dynamic') {
     # FFmpeg's MSVC shared build installs DLLs and their import libraries in
     # bin/. ffmpeg-sys-next discovers prebuilt libraries exclusively under
     # FFMPEG_DIR/lib, so mirror only the four import libraries there.
-    foreach ($library in @('avcodec.lib', 'avformat.lib', 'avutil.lib', 'swscale.lib')) {
+    foreach ($library in @('avcodec.lib', 'avformat.lib', 'avutil.lib')) {
         $source = Join-Path $Prefix "bin\$library"
         if (-not (Test-Path -LiteralPath $source)) {
             throw "Shared FFmpeg import library was not installed: $source"

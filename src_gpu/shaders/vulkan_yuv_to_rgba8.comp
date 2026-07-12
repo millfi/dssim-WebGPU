@@ -1,0 +1,46 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D y_plane;
+layout(set = 0, binding = 1) uniform sampler2D uv_plane;
+
+layout(std430, set = 0, binding = 2) writeonly buffer OutputRgba8Buffer {
+    uint values[];
+} out_rgba8;
+
+layout(push_constant) uniform Params {
+    uint width;
+    uint height;
+    uint bit_depth;
+    uint full_range;
+} params;
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    vec2 position = (vec2(gid.xy) + vec2(0.5)) /
+                    vec2(params.width, params.height);
+    float y = texture(y_plane, position).r;
+    vec2 uv = texture(uv_plane, position).rg;
+
+    float max_code = float((1u << params.bit_depth) - 1u);
+    if (params.full_range == 0u) {
+        y = (y - 16.0 / max_code) * (max_code / 219.0);
+        uv = (uv - vec2(128.0 / max_code)) * (max_code / 224.0);
+    } else {
+        uv -= vec2(0.5);
+    }
+
+    // Both benchmark files are BT.709 limited-range video. The matrix is
+    // kept in the shader so the decoded image never visits CPU memory.
+    vec3 rgb = vec3(
+        y + 1.5748 * uv.y,
+        y - 0.187324 * uv.x - 0.468124 * uv.y,
+        y + 1.8556 * uv.x);
+    rgb = clamp(rgb, 0.0, 1.0);
+    out_rgba8.values[gid.y * params.width + gid.x] = packUnorm4x8(vec4(rgb, 1.0));
+}

@@ -23,13 +23,25 @@ CMake locates the SDK with `find_package(Vulkan REQUIRED COMPONENTS glslc)`.
 The standard Vulkan SDK installation sets `VULKAN_SDK`, which CMake can use to
 find these components. There is no automatic SDK download.
 
-Both input images must be PNG files with identical dimensions.
+Inputs may be same-size PNG images or same-resolution MP4/WebM videos. Video
+frames are decoded through FFmpeg's Vulkan Video H.264/HEVC/AV1/VP9 hwaccels as
+`AV_PIX_FMT_VULKAN`; the decoded Vulkan images are converted to RGBA8 on the
+GPU and never read back to CPU memory.
 
 ## Build
 
 Run all repository commands from PowerShell:
 
 ```powershell
+& cmake -S . -B build
+& cmake --build build --config Release --target dssim_webgpu
+```
+
+Build the minimal dynamically linked FFmpeg Vulkan Video distribution first
+when setting up video support:
+
+```powershell
+& .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic
 & cmake -S . -B build
 & cmake --build build --config Release --target dssim_webgpu
 ```
@@ -235,6 +247,33 @@ PowerShell with:
 ```powershell
 & glslc --version
 ```
+
+Video comparison reports the number of decoded frame pairs:
+
+```powershell
+& .\build\src_gpu\Release\dssim-WebGPU.exe `
+    .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 `
+    .\benchmark\3s.webm `
+    --profiling
+```
+
+During video comparison, stderr reports FPS, processed frame count, elapsed
+seconds, the most recently evaluated frame's DSSIM, and the running average
+DSSIM for every frame. Add `--csv <path>` to save one row per frame:
+
+```powershell
+& .\build\src_gpu\Release\dssim-WebGPU.exe `
+    .\benchmark\video-a.webm `
+    .\benchmark\video-b.webm `
+    --csv .\out\video_scores.csv
+```
+
+The CSV columns are `time_seconds,frame_number,dssim`; frame numbers start at 0.
+Video decoding and comparison overlap through a frame-pair queue. Set the total
+in-flight frame-pair limit with `--pipeline-depth <N>`; the default is 3. `frame_number` identifies
+the same frame on the decode and comparison sides and is also used for ordering
+validation and CSV output.
+Each input video has its own dedicated FFmpeg decode thread.
 
 The build compiles these GLSL compute shaders to SPIR-V; shaders are not
 compiled at application startup:

@@ -1,5 +1,24 @@
 find_package(Vulkan 1.3 REQUIRED COMPONENTS glslc)
 
+set(DSSIM_FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/third_party/ffmpeg-8.1.2-shared" CACHE PATH
+    "FFmpeg prefix containing the Vulkan Video development headers and import libraries")
+find_path(DSSIM_FFMPEG_INCLUDE_DIR
+    NAMES libavcodec/avcodec.h
+    PATHS "${DSSIM_FFMPEG_ROOT}/include"
+    NO_DEFAULT_PATH)
+find_library(DSSIM_FFMPEG_AVCODEC_LIBRARY NAMES avcodec avcodec-62
+    PATHS "${DSSIM_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+find_library(DSSIM_FFMPEG_AVFORMAT_LIBRARY NAMES avformat avformat-62
+    PATHS "${DSSIM_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+find_library(DSSIM_FFMPEG_AVUTIL_LIBRARY NAMES avutil avutil-60
+    PATHS "${DSSIM_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+if(NOT DSSIM_FFMPEG_INCLUDE_DIR OR NOT DSSIM_FFMPEG_AVCODEC_LIBRARY OR
+   NOT DSSIM_FFMPEG_AVFORMAT_LIBRARY OR NOT DSSIM_FFMPEG_AVUTIL_LIBRARY)
+    message(FATAL_ERROR
+        "Vulkan Video FFmpeg development files were not found under ${DSSIM_FFMPEG_ROOT}. "
+        "Run tools/build_ffmpeg_minimal.ps1 -Linkage Dynamic first.")
+endif()
+
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES "${Vulkan_INCLUDE_DIRS}")
 check_cxx_source_compiles([=[
@@ -57,6 +76,7 @@ endif()
 add_executable(dssim_webgpu
     dssim-WebGPU.cpp
     png_loader.cpp
+    video_decoder.cpp
 )
 set_target_properties(dssim_webgpu PROPERTIES
     OUTPUT_NAME "dssim-WebGPU"
@@ -66,11 +86,23 @@ set_target_properties(dssim_webgpu PROPERTIES
 target_compile_features(dssim_webgpu PRIVATE cxx_std_20)
 target_include_directories(dssim_webgpu PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${DSSIM_FFMPEG_INCLUDE_DIR}"
 )
 target_link_libraries(dssim_webgpu PRIVATE
     Vulkan::Vulkan
     "${DSSIM_PNG_TARGET}"
+    "${DSSIM_FFMPEG_AVCODEC_LIBRARY}"
+    "${DSSIM_FFMPEG_AVFORMAT_LIBRARY}"
+    "${DSSIM_FFMPEG_AVUTIL_LIBRARY}"
 )
+
+if(WIN32)
+    add_custom_command(TARGET dssim_webgpu POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${DSSIM_FFMPEG_ROOT}/bin"
+            "$<TARGET_FILE_DIR:dssim_webgpu>"
+        COMMENT "Copying dynamically linked FFmpeg Vulkan Video DLLs")
+endif()
 
 if(MSVC)
     target_compile_options(dssim_webgpu PRIVATE /W4 /EHsc)
@@ -80,6 +112,7 @@ endif()
 
 set(DSSIM_GPU_SHADER_NAMES
     rgba8_to_linear
+    vulkan_yuv_to_rgba8
     downsample_2x2
     lab_preprocess
     stage0_absdiff

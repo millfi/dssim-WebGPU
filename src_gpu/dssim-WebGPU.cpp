@@ -2,8 +2,11 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -11,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -24,6 +28,7 @@
 #include <vulkan/vulkan.h>
 
 #include "png_loader.h"
+#include "video_decoder.h"
 using namespace std::chrono;
 namespace {
 
@@ -45,10 +50,14 @@ struct CliOptions {
     std::filesystem::path image1;
     std::filesystem::path image2;
     std::filesystem::path out;
+    std::filesystem::path csv;
     std::filesystem::path debugDumpDir;
     bool debugDumpEnabled = false;
     bool stdinPairsMode = false;
     bool profilingEnabled = false;
+    bool csvEnabled = false;
+    std::size_t pipelineDepth = 3;
+    bool pipelineDepthExplicit = false;
 };
 
 struct ComparisonRequest {
@@ -229,6 +238,12 @@ struct GpuSession {
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queueFamilyIndex = 0;
+    VkQueueFlags computeQueueFlags = 0;
+    std::uint32_t videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    VkQueueFlags videoDecodeQueueFlags = 0;
+    VkVideoCodecOperationFlagsKHR videoDecodeCaps = 0;
+    bool videoSupported = false;
+    std::vector<const char*> videoDeviceExtensions;
     VkPhysicalDeviceProperties physicalDeviceProperties{};
     std::string adapterName = "unknown";
     bool timestampQueryEnabled = false;
@@ -248,6 +263,9 @@ struct GpuSession {
     ComputeShader stage0ScoreShader;
     ComputeShader downsampleShader;
     ComputeShader rgba8ToLinearShader;
+    ComputeShader vulkanYuvToRgbaShader;
+    VkSampler videoYSampler = VK_NULL_HANDLE;
+    VkSampler videoUvSampler = VK_NULL_HANDLE;
     VulkanBuffer srgbToLinearLutBuffer;
 
     std::unique_ptr<Stage0Resources> debugStage0Resources;
@@ -363,6 +381,42 @@ CliOptions ParseArgs(int argc, char** argv) {
             continue;
         }
 
+        if (arg == "--pipeline-depth") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("missing value for --pipeline-depth");
+            }
+            const std::string value = argv[++i];
+            try {
+                std::size_t parsedChars = 0;
+                const unsigned long long parsed = std::stoull(value, &parsedChars);
+                if (parsedChars != value.size() || parsed == 0u ||
+                    parsed > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+                    throw std::runtime_error("invalid value");
+                }
+                options.pipelineDepth = static_cast<std::size_t>(parsed);
+                options.pipelineDepthExplicit = true;
+            } catch (const std::exception&) {
+                throw std::runtime_error("--pipeline-depth must be a positive integer");
+            }
+            continue;
+        }
+        if (arg.rfind("--pipeline-depth=", 0) == 0) {
+            const std::string value = arg.substr(std::string("--pipeline-depth=").size());
+            try {
+                std::size_t parsedChars = 0;
+                const unsigned long long parsed = std::stoull(value, &parsedChars);
+                if (parsedChars != value.size() || parsed == 0u ||
+                    parsed > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+                    throw std::runtime_error("invalid value");
+                }
+                options.pipelineDepth = static_cast<std::size_t>(parsed);
+                options.pipelineDepthExplicit = true;
+            } catch (const std::exception&) {
+                throw std::runtime_error("--pipeline-depth must be a positive integer");
+            }
+            continue;
+        }
+
         if (arg == "--out") {
             if (i + 1 >= argc) {
                 throw std::runtime_error("missing value for --out");
@@ -372,6 +426,20 @@ CliOptions ParseArgs(int argc, char** argv) {
         }
         if (arg.rfind("--out=", 0) == 0) {
             options.out = arg.substr(std::string("--out=").size());
+            continue;
+        }
+
+        if (arg == "--csv") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("missing value for --csv");
+            }
+            options.csv = argv[++i];
+            options.csvEnabled = true;
+            continue;
+        }
+        if (arg.rfind("--csv=", 0) == 0) {
+            options.csv = arg.substr(std::string("--csv=").size());
+            options.csvEnabled = true;
             continue;
         }
 
@@ -407,6 +475,9 @@ CliOptions ParseArgs(int argc, char** argv) {
     if (options.debugDumpEnabled && options.debugDumpDir.empty()) {
         throw std::runtime_error("empty --debug-dump-dir");
     }
+    if (options.csvEnabled && options.csv.empty()) {
+        throw std::runtime_error("empty --csv path");
+    }
     if (options.stdinPairsMode) {
         if (positionalCount != 0) {
             throw std::runtime_error("--stdin-pairs does not accept positional image arguments");
@@ -414,13 +485,20 @@ CliOptions ParseArgs(int argc, char** argv) {
         if (!options.out.empty()) {
             throw std::runtime_error("--stdin-pairs cannot be combined with --out");
         }
+        if (options.csvEnabled) {
+            throw std::runtime_error("--stdin-pairs cannot be combined with --csv");
+        }
         if (options.debugDumpEnabled) {
             throw std::runtime_error("--stdin-pairs cannot be combined with --debug-dump-dir");
+        }
+        if (options.pipelineDepthExplicit) {
+            throw std::runtime_error("--stdin-pairs cannot be combined with --pipeline-depth");
         }
     } else if (positionalCount != 2) {
         throw std::runtime_error(
             "usage: dssim-WebGPU <img1> <img2> [--out <json>] "
-            "[--debug-dump-dir <dir>] [--stdin-pairs] [--profiling]");
+            "[--csv <path>] [--pipeline-depth <N>] [--debug-dump-dir <dir>] "
+            "[--stdin-pairs] [--profiling]");
     }
 
     return options;
@@ -943,6 +1021,13 @@ GpuSession::~GpuSession() {
         DestroyComputeShader(*this, stage0Shader);
         DestroyComputeShader(*this, stage0ScoreShader);
         DestroyComputeShader(*this, downsampleShader);
+        DestroyComputeShader(*this, vulkanYuvToRgbaShader);
+        if (videoYSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, videoYSampler, nullptr);
+        }
+        if (videoUvSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, videoUvSampler, nullptr);
+        }
         if (timestampQueryPool != VK_NULL_HANDLE) {
             vkDestroyQueryPool(device, timestampQueryPool, nullptr);
         }
@@ -993,15 +1078,77 @@ void EndTimestamp(GpuSession& session) {
     }
 }
 
-void SubmitCommands(GpuSession& session) {
+void SubmitCommands(
+    GpuSession& session,
+    std::span<const VulkanVideoFrame* const> videoFrames = {}) {
     VkCheck(vkEndCommandBuffer(session.commandBuffer), "vkEndCommandBuffer");
     VkCheck(vkResetFences(session.device, 1, &session.submitFence), "vkResetFences");
+
+    std::array<VkSemaphore, 2> waitSemaphores{};
+    std::array<VkSemaphore, 2> signalSemaphores{};
+    std::array<std::uint64_t, 2> waitValues{};
+    std::array<std::uint64_t, 2> signalValues{};
+    std::array<VkPipelineStageFlags, 2> waitStages{};
+    std::uint32_t semaphoreCount = 0;
+    for (const VulkanVideoFrame* frame : videoFrames) {
+        if (frame == nullptr || frame->vkFrame == nullptr || frame->vkFrame->sem[0] == VK_NULL_HANDLE) {
+            continue;
+        }
+        const VkSemaphore semaphore = frame->vkFrame->sem[0];
+        bool alreadyAdded = false;
+        for (std::uint32_t i = 0; i < semaphoreCount; ++i) {
+            alreadyAdded = alreadyAdded || waitSemaphores[i] == semaphore;
+        }
+        if (!alreadyAdded) {
+            if (semaphoreCount == waitSemaphores.size()) {
+                throw std::runtime_error("too many Vulkan Video synchronization semaphores");
+            }
+            waitSemaphores[semaphoreCount] = semaphore;
+            signalSemaphores[semaphoreCount] = semaphore;
+            waitValues[semaphoreCount] = frame->vkFrame->sem_value[0];
+            signalValues[semaphoreCount] = waitValues[semaphoreCount] + 1u;
+            waitStages[semaphoreCount] = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            ++semaphoreCount;
+        }
+    }
+    const VkTimelineSemaphoreSubmitInfo timelineInfo = {
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .waitSemaphoreValueCount = semaphoreCount,
+        .pWaitSemaphoreValues = waitValues.data(),
+        .signalSemaphoreValueCount = semaphoreCount,
+        .pSignalSemaphoreValues = signalValues.data(),
+    };
     const VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = semaphoreCount > 0 ? &timelineInfo : nullptr,
+        .waitSemaphoreCount = semaphoreCount,
+        .pWaitSemaphores = waitSemaphores.data(),
+        .pWaitDstStageMask = waitStages.data(),
         .commandBufferCount = 1,
         .pCommandBuffers = &session.commandBuffer,
+        .signalSemaphoreCount = semaphoreCount,
+        .pSignalSemaphores = signalSemaphores.data(),
     };
     VkCheck(vkQueueSubmit(session.queue, 1, &submitInfo, session.submitFence), "vkQueueSubmit");
+
+    for (const VulkanVideoFrame* frame : videoFrames) {
+        if (frame != nullptr && frame->vkFrame != nullptr && frame->vkFrame->sem[0] != VK_NULL_HANDLE) {
+            bool alreadyUpdated = false;
+            for (const VulkanVideoFrame* previous : videoFrames) {
+                if (previous == frame) {
+                    break;
+                }
+                if (previous != nullptr && previous->vkFrame != nullptr &&
+                    previous->vkFrame->sem[0] == frame->vkFrame->sem[0]) {
+                    alreadyUpdated = true;
+                    break;
+                }
+            }
+            if (!alreadyUpdated) {
+                frame->vkFrame->sem_value[0]++;
+            }
+        }
+    }
 }
 
 void WaitForSubmission(GpuSession& session) {
@@ -1039,7 +1186,8 @@ void BindShader(GpuSession& session, const ComputeShader& shader) {
 void PushStorageDescriptors(
     GpuSession& session,
     const ComputeShader& shader,
-    std::span<const VkDescriptorBufferInfo> bufferInfos) {
+    std::span<const VkDescriptorBufferInfo> bufferInfos,
+    std::uint32_t firstBinding = 0) {
     if (bufferInfos.size() > 8u) {
         throw std::runtime_error("too many push descriptors");
     }
@@ -1047,7 +1195,7 @@ void PushStorageDescriptors(
     for (std::size_t i = 0; i < bufferInfos.size(); ++i) {
         writes[i] = {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstBinding = static_cast<std::uint32_t>(i),
+            .dstBinding = firstBinding + static_cast<std::uint32_t>(i),
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .pBufferInfo = &bufferInfos[i],
@@ -1059,6 +1207,33 @@ void PushStorageDescriptors(
         shader.pipelineLayout,
         0,
         static_cast<std::uint32_t>(bufferInfos.size()),
+        writes.data());
+}
+
+void PushSampledImageDescriptors(
+    GpuSession& session,
+    const ComputeShader& shader,
+    std::span<const VkDescriptorImageInfo> imageInfos,
+    std::uint32_t firstBinding = 0) {
+    if (imageInfos.size() > 8u) {
+        throw std::runtime_error("too many image descriptors");
+    }
+    std::array<VkWriteDescriptorSet, 8> writes{};
+    for (std::size_t i = 0; i < imageInfos.size(); ++i) {
+        writes[i] = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding = firstBinding + static_cast<std::uint32_t>(i),
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &imageInfos[i],
+        };
+    }
+    session.cmdPushDescriptorSet(
+        session.commandBuffer,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        shader.pipelineLayout,
+        0,
+        static_cast<std::uint32_t>(imageInfos.size()),
         writes.data());
 }
 
@@ -1551,12 +1726,141 @@ BatchStageLayout BuildBatchStageLayout(
     return layout;
 }
 
+struct VideoImageViews {
+    VkImageView y = VK_NULL_HANDLE;
+    VkImageView uv = VK_NULL_HANDLE;
+    VkImageLayout originalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkAccessFlags originalAccess = 0;
+    std::uint32_t originalQueueFamily = VK_QUEUE_FAMILY_IGNORED;
+
+    VkDevice device = VK_NULL_HANDLE;
+    ~VideoImageViews() {
+        if (device != VK_NULL_HANDLE) {
+            if (y != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, y, nullptr);
+            }
+            if (uv != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, uv, nullptr);
+            }
+        }
+    }
+    VideoImageViews(const VideoImageViews&) = delete;
+    VideoImageViews& operator=(const VideoImageViews&) = delete;
+    VideoImageViews() = default;
+    VideoImageViews(VideoImageViews&& other) noexcept
+        : y(std::exchange(other.y, VK_NULL_HANDLE)),
+          uv(std::exchange(other.uv, VK_NULL_HANDLE)),
+          originalLayout(other.originalLayout),
+          originalAccess(other.originalAccess),
+          originalQueueFamily(other.originalQueueFamily),
+          device(std::exchange(other.device, VK_NULL_HANDLE)) {}
+};
+
+VkImageView CreateVideoPlaneView(
+    const GpuSession& session,
+    VkImage image,
+    VkFormat format,
+    VkImageAspectFlags aspect) {
+    const VkImageViewCreateInfo viewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .subresourceRange = {
+            .aspectMask = aspect,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    VkImageView view = VK_NULL_HANDLE;
+    VkCheck(vkCreateImageView(session.device, &viewInfo, nullptr, &view), "vkCreateImageView");
+    return view;
+}
+
+VideoImageViews CreateVideoImageViews(
+    const GpuSession& session,
+    const VulkanVideoFrame& frame) {
+    if (frame.vkFrame == nullptr || frame.framesContext == nullptr) {
+        throw std::runtime_error("invalid Vulkan Video frame metadata");
+    }
+    const bool tenBit = frame.softwareFormat == AV_PIX_FMT_P010LE ||
+                        frame.softwareFormat == AV_PIX_FMT_P010BE;
+    const VkFormat planeFormat = tenBit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+    const VkFormat chromaFormat = tenBit ? VK_FORMAT_R16G16_UNORM : VK_FORMAT_R8G8_UNORM;
+
+    VideoImageViews views;
+    views.device = session.device;
+    views.originalLayout = frame.vkFrame->layout[0];
+    views.originalAccess = frame.vkFrame->access[0];
+    views.originalQueueFamily = frame.vkFrame->queue_family[0];
+
+    if (frame.vkFrame->img[1] != VK_NULL_HANDLE) {
+        views.y = CreateVideoPlaneView(session, frame.vkFrame->img[0], planeFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+        views.uv = CreateVideoPlaneView(session, frame.vkFrame->img[1], chromaFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+    } else {
+        views.y = CreateVideoPlaneView(
+            session, frame.vkFrame->img[0], planeFormat, VK_IMAGE_ASPECT_PLANE_0_BIT);
+        views.uv = CreateVideoPlaneView(
+            session, frame.vkFrame->img[0], chromaFormat, VK_IMAGE_ASPECT_PLANE_1_BIT);
+    }
+    return views;
+}
+
+void RecordVideoImageBarrier(
+    GpuSession& session,
+    const VulkanVideoFrame& frame,
+    VkImageLayout newLayout,
+    VkAccessFlags2 newAccess,
+    std::uint32_t newQueueFamily,
+    VkPipelineStageFlags2 srcStage,
+    VkPipelineStageFlags2 dstStage) {
+    if (frame.vkFrame->img[1] != VK_NULL_HANDLE) {
+        throw std::runtime_error("separate-plane Vulkan Video frames are not supported");
+    }
+    const std::uint32_t destinationQueueFamily =
+        frame.vkFrame->queue_family[0] == VK_QUEUE_FAMILY_IGNORED
+            ? VK_QUEUE_FAMILY_IGNORED
+            : newQueueFamily;
+    const VkImageMemoryBarrier2 imageBarrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = srcStage,
+        .srcAccessMask = static_cast<VkAccessFlags2>(frame.vkFrame->access[0]),
+        .dstStageMask = dstStage,
+        .dstAccessMask = newAccess,
+        .oldLayout = frame.vkFrame->layout[0],
+        .newLayout = newLayout,
+        .srcQueueFamilyIndex = frame.vkFrame->queue_family[0],
+        .dstQueueFamilyIndex = destinationQueueFamily,
+        .image = frame.vkFrame->img[0],
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    const VkDependencyInfo dependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &imageBarrier,
+    };
+    vkCmdPipelineBarrier2(session.commandBuffer, &dependency);
+    frame.vkFrame->layout[0] = newLayout;
+    frame.vkFrame->access[0] = static_cast<VkAccessFlagBits>(newAccess);
+    frame.vkFrame->queue_family[0] = destinationQueueFamily;
+}
+
 std::vector<ScaleOutputs> RunStage0BatchCompute(
     GpuSession& session,
     std::span<const std::uint8_t> input1,
     std::span<const std::uint8_t> input2,
     const std::vector<std::uint32_t>& widths,
-    const std::vector<std::uint32_t>& heights) {
+    const std::vector<std::uint32_t>& heights,
+    const VulkanVideoFrame* video1 = nullptr,
+    const VulkanVideoFrame* video2 = nullptr) {
     const std::size_t levelCount = widths.size();
     if (levelCount == 0 || heights.size() != levelCount) {
         throw std::runtime_error("invalid batch dimensions");
@@ -1579,7 +1883,14 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
 
     const std::size_t baseElemCount = elemCounts.front();
     const VkDeviceSize rgba8Bytes = baseElemCount * 4u;
-    if (input1.size() != rgba8Bytes || input2.size() != rgba8Bytes) {
+    const bool videoInput = video1 != nullptr || video2 != nullptr;
+    if (videoInput && (video1 == nullptr || video2 == nullptr)) {
+        throw std::runtime_error("both video inputs must be Vulkan frames");
+    }
+    if ((!videoInput && (input1.size() != rgba8Bytes || input2.size() != rgba8Bytes)) ||
+        (videoInput &&
+         (video1->width != widths.front() || video1->height != heights.front() ||
+          video2->width != widths.front() || video2->height != heights.front()))) {
         throw std::runtime_error("batch input dimensions do not match pixel count");
     }
     const VkDeviceSize inputBytes = baseElemCount * sizeof(LinearRgba);
@@ -1629,10 +1940,12 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     BatchStage0Resources& resources = *session.batchStage0Resources;
 
     const auto writeStartedAt = std::chrono::steady_clock::now();
-    auto* upload = static_cast<std::uint8_t*>(resources.upload.mapped);
-    std::memcpy(upload + layout.upload1.offset, input1.data(), rgba8Bytes);
-    std::memcpy(upload + layout.upload2.offset, input2.data(), rgba8Bytes);
-    FlushMappedBuffer(resources.upload);
+    if (!videoInput) {
+        auto* upload = static_cast<std::uint8_t*>(resources.upload.mapped);
+        std::memcpy(upload + layout.upload1.offset, input1.data(), rgba8Bytes);
+        std::memcpy(upload + layout.upload2.offset, input2.data(), rgba8Bytes);
+        FlushMappedBuffer(resources.upload);
+    }
     outputs.front().writeInputBuffers_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - writeStartedAt);
@@ -1651,31 +1964,60 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     };
 
     const auto dispatchStartedAt = std::chrono::steady_clock::now();
+    std::unique_ptr<VideoImageViews> videoViews1;
+    std::unique_ptr<VideoImageViews> videoViews2;
+    if (videoInput) {
+        videoViews1 = std::make_unique<VideoImageViews>(CreateVideoImageViews(session, *video1));
+        videoViews2 = std::make_unique<VideoImageViews>(CreateVideoImageViews(session, *video2));
+        reinterpret_cast<AVVulkanFramesContext*>(video1->framesContext->hwctx)
+            ->lock_frame(video1->framesContext, video1->vkFrame);
+        reinterpret_cast<AVVulkanFramesContext*>(video2->framesContext->hwctx)
+            ->lock_frame(video2->framesContext, video2->vkFrame);
+    }
     BeginCommands(session);
-    const std::array<VkBufferCopy, 2> inputCopies = {{
-        {
-            .srcOffset = layout.upload1.offset,
-            .dstOffset = layout.rgba8Input1.offset,
-            .size = rgba8Bytes,
-        },
-        {
-            .srcOffset = layout.upload2.offset,
-            .dstOffset = layout.rgba8Input2.offset,
-            .size = rgba8Bytes,
-        },
-    }};
-    vkCmdCopyBuffer(
-        session.commandBuffer,
-        resources.upload.buffer,
-        resources.workspace.buffer,
-        static_cast<std::uint32_t>(inputCopies.size()),
-        inputCopies.data());
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    if (!videoInput) {
+        const std::array<VkBufferCopy, 2> inputCopies = {{
+            {
+                .srcOffset = layout.upload1.offset,
+                .dstOffset = layout.rgba8Input1.offset,
+                .size = rgba8Bytes,
+            },
+            {
+                .srcOffset = layout.upload2.offset,
+                .dstOffset = layout.rgba8Input2.offset,
+                .size = rgba8Bytes,
+            },
+        }};
+        vkCmdCopyBuffer(
+            session.commandBuffer,
+            resources.upload.buffer,
+            resources.workspace.buffer,
+            static_cast<std::uint32_t>(inputCopies.size()),
+            inputCopies.data());
+        MemoryBarrier(
+            session.commandBuffer,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    } else {
+        RecordVideoImageBarrier(
+            session,
+            *video1,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            session.queueFamilyIndex,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+        RecordVideoImageBarrier(
+            session,
+            *video2,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            session.queueFamilyIndex,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    }
     BeginTimestamp(session);
 
     const ParamsData baseParams = {
@@ -1693,23 +2035,93 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         .offset = 0,
         .range = 256u * sizeof(float),
     };
-    BindShader(session, session.rgba8ToLinearShader);
-    const std::array<VkDescriptorBufferInfo, 3> convert1 = {{
-        DescribeBuffer(resources.workspace, layout.rgba8Input1),
-        DescribeBuffer(resources.workspace, layout.input1),
-        lutDescriptor,
-    }};
-    PushStorageDescriptors(session, session.rgba8ToLinearShader, convert1);
-    PushParams(session, session.rgba8ToLinearShader, baseParams);
-    vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
-    const std::array<VkDescriptorBufferInfo, 3> convert2 = {{
-        DescribeBuffer(resources.workspace, layout.rgba8Input2),
-        DescribeBuffer(resources.workspace, layout.input2),
-        lutDescriptor,
-    }};
-    PushStorageDescriptors(session, session.rgba8ToLinearShader, convert2);
-    PushParams(session, session.rgba8ToLinearShader, baseParams);
-    vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+    if (!videoInput) {
+        BindShader(session, session.rgba8ToLinearShader);
+        const std::array<VkDescriptorBufferInfo, 3> convert1 = {{
+            DescribeBuffer(resources.workspace, layout.rgba8Input1),
+            DescribeBuffer(resources.workspace, layout.input1),
+            lutDescriptor,
+        }};
+        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert1);
+        PushParams(session, session.rgba8ToLinearShader, baseParams);
+        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+        const std::array<VkDescriptorBufferInfo, 3> convert2 = {{
+            DescribeBuffer(resources.workspace, layout.rgba8Input2),
+            DescribeBuffer(resources.workspace, layout.input2),
+            lutDescriptor,
+        }};
+        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert2);
+        PushParams(session, session.rgba8ToLinearShader, baseParams);
+        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+    } else {
+        const struct YuvParams {
+            std::uint32_t width;
+            std::uint32_t height;
+            std::uint32_t bitDepth;
+            std::uint32_t fullRange;
+        } yuvParams = {
+            .width = widths.front(),
+            .height = heights.front(),
+            // FFmpeg's Vulkan plane views expose the normalized component
+            // range used by the benchmark's NV12/P010 surfaces. Using the
+            // 8-bit code range keeps both formats on the same conversion
+            // path (and matches FFmpeg's limited-range conversion here).
+            .bitDepth = 8u,
+            .fullRange = (video1->colorRange == AVCOL_RANGE_JPEG ||
+                          video2->colorRange == AVCOL_RANGE_JPEG) ? 1u : 0u,
+        };
+        BindShader(session, session.vulkanYuvToRgbaShader);
+        const std::array<VkDescriptorImageInfo, 2> images1 = {{
+            {.sampler = session.videoYSampler, .imageView = videoViews1->y, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {.sampler = session.videoUvSampler, .imageView = videoViews1->uv, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        }};
+        PushSampledImageDescriptors(session, session.vulkanYuvToRgbaShader, images1);
+        const VkDescriptorBufferInfo output1 = DescribeBuffer(resources.workspace, layout.rgba8Input1);
+        PushStorageDescriptors(session, session.vulkanYuvToRgbaShader, std::span(&output1, 1), 2);
+        PushParams(session, session.vulkanYuvToRgbaShader, yuvParams);
+        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+        const std::array<VkDescriptorImageInfo, 2> images2 = {{
+            {.sampler = session.videoYSampler, .imageView = videoViews2->y, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {.sampler = session.videoUvSampler, .imageView = videoViews2->uv, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        }};
+        PushSampledImageDescriptors(session, session.vulkanYuvToRgbaShader, images2);
+        const VkDescriptorBufferInfo output2 = DescribeBuffer(resources.workspace, layout.rgba8Input2);
+        PushStorageDescriptors(session, session.vulkanYuvToRgbaShader, std::span(&output2, 1), 2);
+        PushParams(session, session.vulkanYuvToRgbaShader, yuvParams);
+        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+        RecordVideoImageBarrier(
+            session, *video1, videoViews1->originalLayout,
+            static_cast<VkAccessFlags2>(videoViews1->originalAccess),
+            videoViews1->originalQueueFamily,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+        RecordVideoImageBarrier(
+            session, *video2, videoViews2->originalLayout,
+            static_cast<VkAccessFlags2>(videoViews2->originalAccess),
+            videoViews2->originalQueueFamily,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+
+        // Keep the same packed-RGBA8 -> linear-premultiplied path as still
+        // images. The YUV conversion above only replaces the CPU upload.
+        BindShader(session, session.rgba8ToLinearShader);
+        const std::array<VkDescriptorBufferInfo, 3> convert1 = {{
+            DescribeBuffer(resources.workspace, layout.rgba8Input1),
+            DescribeBuffer(resources.workspace, layout.input1),
+            lutDescriptor,
+        }};
+        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert1);
+        PushParams(session, session.rgba8ToLinearShader, baseParams);
+        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+        const std::array<VkDescriptorBufferInfo, 3> convert2 = {{
+            DescribeBuffer(resources.workspace, layout.rgba8Input2),
+            DescribeBuffer(resources.workspace, layout.input2),
+            lutDescriptor,
+        }};
+        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert2);
+        PushParams(session, session.rgba8ToLinearShader, baseParams);
+        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+    }
     MemoryBarrier(
         session.commandBuffer,
         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1841,7 +2253,17 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         VK_ACCESS_2_TRANSFER_WRITE_BIT,
         VK_PIPELINE_STAGE_2_HOST_BIT,
         VK_ACCESS_2_HOST_READ_BIT);
-    SubmitCommands(session);
+    const std::array<const VulkanVideoFrame*, 2> submittedVideoFrames = {video1, video2};
+    SubmitCommands(
+        session,
+        videoInput ? std::span<const VulkanVideoFrame* const>(submittedVideoFrames) :
+                      std::span<const VulkanVideoFrame* const>());
+    if (videoInput) {
+        reinterpret_cast<AVVulkanFramesContext*>(video1->framesContext->hwctx)
+            ->unlock_frame(video1->framesContext, video1->vkFrame);
+        reinterpret_cast<AVVulkanFramesContext*>(video2->framesContext->hwctx)
+            ->unlock_frame(video2->framesContext, video2->vkFrame);
+    }
     outputs.front().dispatchAndSubmit_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - dispatchStartedAt);
@@ -1971,6 +2393,8 @@ struct PhysicalDeviceSelection {
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     std::uint32_t queueFamilyIndex = 0;
     VkQueueFamilyProperties queueFamilyProperties{};
+    std::uint32_t videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    VkQueueFamilyProperties videoDecodeQueueProperties{};
     VkPhysicalDeviceProperties properties{};
 };
 
@@ -2009,6 +2433,13 @@ PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
             !HasDeviceExtension(physicalDevice, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
             continue;
         }
+        const bool hasVideoDecodeExtensions =
+            HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) &&
+            HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) &&
+            (HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME) ||
+             HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME) ||
+             HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME) ||
+             HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME));
 
         VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{};
         shaderObjectFeatures.sType =
@@ -2033,10 +2464,20 @@ PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
         std::vector<VkQueueFamilyProperties> queues(queueCount);
         vkGetPhysicalDeviceQueueFamilyProperties(
             physicalDevice, &queueCount, queues.data());
+        std::uint32_t videoQueueIndex = VK_QUEUE_FAMILY_IGNORED;
+        VkQueueFamilyProperties videoQueueProperties{};
         for (std::uint32_t queueIndex = 0; queueIndex < queueCount; ++queueIndex) {
             const VkQueueFamilyProperties& queue = queues[queueIndex];
-            if (queue.queueCount == 0 ||
-                (queue.queueFlags & VK_QUEUE_COMPUTE_BIT) == 0) {
+            if (queue.queueCount == 0) {
+                continue;
+            }
+            if (hasVideoDecodeExtensions &&
+                (queue.queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) != 0 &&
+                videoQueueIndex == VK_QUEUE_FAMILY_IGNORED) {
+                videoQueueIndex = queueIndex;
+                videoQueueProperties = queue;
+            }
+            if ((queue.queueFlags & VK_QUEUE_COMPUTE_BIT) == 0) {
                 continue;
             }
             int score = 0;
@@ -2055,6 +2496,8 @@ PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
                     .physicalDevice = physicalDevice,
                     .queueFamilyIndex = queueIndex,
                     .queueFamilyProperties = queue,
+                    .videoDecodeQueueFamilyIndex = videoQueueIndex,
+                    .videoDecodeQueueProperties = videoQueueProperties,
                     .properties = properties,
                 };
             }
@@ -2065,6 +2508,25 @@ PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
             "no Vulkan 1.3 compute device supports VK_EXT_shader_object, "
             "VK_KHR_push_descriptor, synchronization2, dynamic rendering, "
             "and the required compute shader limits");
+    }
+    if (HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) &&
+        HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) &&
+        (HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME) ||
+         HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME) ||
+         HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME) ||
+         HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME))) {
+        std::uint32_t queueCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(best.physicalDevice, &queueCount, nullptr);
+        std::vector<VkQueueFamilyProperties> queues(queueCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(best.physicalDevice, &queueCount, queues.data());
+        for (std::uint32_t queueIndex = 0; queueIndex < queueCount; ++queueIndex) {
+            if (queues[queueIndex].queueCount != 0 &&
+                (queues[queueIndex].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) != 0) {
+                best.videoDecodeQueueFamilyIndex = queueIndex;
+                best.videoDecodeQueueProperties = queues[queueIndex];
+                break;
+            }
+        }
     }
     if (best.properties.limits.maxPushConstantsSize < 16u) {
         throw std::runtime_error(
@@ -2088,14 +2550,21 @@ PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
 ComputeShader CreateComputeShader(
     GpuSession& session,
     std::span<const std::uint32_t> spirv,
-    std::uint32_t descriptorCount) {
+    std::uint32_t descriptorCount,
+    std::span<const VkDescriptorType> descriptorTypes = {}) {
     ComputeShader result;
     try {
+        if (!descriptorTypes.empty() && descriptorTypes.size() != descriptorCount) {
+            throw std::runtime_error("descriptor type count does not match shader bindings");
+        }
         std::vector<VkDescriptorSetLayoutBinding> bindings(descriptorCount);
         for (std::uint32_t binding = 0; binding < descriptorCount; ++binding) {
+            const VkDescriptorType descriptorType = descriptorTypes.empty()
+                                                        ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                                        : descriptorTypes[binding];
             bindings[binding] = {
                 .binding = binding,
-                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorType = descriptorType,
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
             };
@@ -2164,6 +2633,7 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     std::span<const std::uint32_t> stage0ScoreSpirv,
     std::span<const std::uint32_t> downsampleSpirv,
     std::span<const std::uint32_t> rgba8ToLinearSpirv,
+    std::span<const std::uint32_t> vulkanYuvToRgbaSpirv,
     bool enableDebugPipeline,
     bool enableTimestampQueries) {
     auto session = std::make_unique<GpuSession>();
@@ -2193,8 +2663,27 @@ std::unique_ptr<GpuSession> CreateGpuSession(
         SelectPhysicalDevice(session->instance);
     session->physicalDevice = selection.physicalDevice;
     session->queueFamilyIndex = selection.queueFamilyIndex;
+    session->computeQueueFlags = selection.queueFamilyProperties.queueFlags;
     session->physicalDeviceProperties = selection.properties;
     session->adapterName = selection.properties.deviceName;
+    session->videoDecodeQueueFamilyIndex = selection.videoDecodeQueueFamilyIndex;
+    session->videoDecodeQueueFlags = selection.videoDecodeQueueProperties.queueFlags;
+    session->videoDecodeCaps = 0;
+    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME)) {
+        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+    }
+    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME)) {
+        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+    }
+    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME)) {
+        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR;
+    }
+    if (HasDeviceExtension(session->physicalDevice, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME)) {
+        session->videoDecodeCaps |= VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
+    }
+    session->videoSupported =
+        selection.videoDecodeQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED &&
+        session->videoDecodeCaps != 0;
 
     VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{};
     shaderObjectFeatures.sType =
@@ -2208,21 +2697,54 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     vulkan13Features.dynamicRendering = VK_TRUE;
 
     const float queuePriority = 1.0f;
-    const VkDeviceQueueCreateInfo queueInfo = {
+    const VkDeviceQueueCreateInfo computeQueueInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
         .queueFamilyIndex = session->queueFamilyIndex,
         .queueCount = 1,
         .pQueuePriorities = &queuePriority,
     };
-    const std::array<const char*, 2> deviceExtensions = {
+    std::array<VkDeviceQueueCreateInfo, 2> queueInfos = {computeQueueInfo, {}};
+    std::uint32_t queueInfoCount = 1;
+    if (session->videoSupported &&
+        session->videoDecodeQueueFamilyIndex != session->queueFamilyIndex) {
+        queueInfos[queueInfoCount++] = {
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = session->videoDecodeQueueFamilyIndex,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriority,
+        };
+    }
+    std::vector<const char*> deviceExtensions = {
         VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
     };
+    if (session->videoSupported) {
+        deviceExtensions.push_back(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME);
+        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) != 0) {
+            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME);
+        }
+        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) != 0) {
+            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME);
+        }
+        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR) != 0) {
+            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME);
+        }
+        if ((session->videoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) != 0) {
+            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME);
+        }
+        if (HasDeviceExtension(
+                session->physicalDevice,
+                VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME)) {
+            deviceExtensions.push_back(VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME);
+        }
+        session->videoDeviceExtensions = deviceExtensions;
+    }
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext = &vulkan13Features;
-    deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.queueCreateInfoCount = queueInfoCount;
+    deviceInfo.pQueueCreateInfos = queueInfos.data();
     deviceInfo.enabledExtensionCount =
         static_cast<std::uint32_t>(deviceExtensions.size());
     deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
@@ -2337,6 +2859,42 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     }
     session->downsampleShader =
         CreateComputeShader(*session, downsampleSpirv, 2);
+    if (session->videoSupported) {
+        const std::array<VkDescriptorType, 3> videoDescriptorTypes = {
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        };
+        session->vulkanYuvToRgbaShader = CreateComputeShader(
+            *session,
+            vulkanYuvToRgbaSpirv,
+            3,
+            videoDescriptorTypes);
+        const VkSamplerCreateInfo ySamplerInfo = {
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = VK_FILTER_NEAREST,
+            .minFilter = VK_FILTER_NEAREST,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .minLod = 0.0f,
+            .maxLod = 0.0f,
+        };
+        const VkSamplerCreateInfo uvSamplerInfo = {
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = VK_FILTER_LINEAR,
+            .minFilter = VK_FILTER_LINEAR,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .minLod = 0.0f,
+            .maxLod = 0.0f,
+        };
+        VkCheck(vkCreateSampler(session->device, &ySamplerInfo, nullptr, &session->videoYSampler), "vkCreateSampler(y)");
+        VkCheck(vkCreateSampler(session->device, &uvSamplerInfo, nullptr, &session->videoUvSampler), "vkCreateSampler(uv)");
+    }
     session->initProfiling.createShaderModuleTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - shadersStartedAt);
@@ -2415,15 +2973,22 @@ RgbaPairComparisonResult CompareRgba8Pair(
     std::span<const std::uint8_t> rgba2,
     std::uint32_t width,
     std::uint32_t height,
-    bool collectDebugData) {
+    bool collectDebugData,
+    const VulkanVideoFrame* video1 = nullptr,
+    const VulkanVideoFrame* video2 = nullptr) {
     if (width == 0u || height == 0u) {
         throw std::runtime_error("RGBA8 comparison dimensions must be non-zero");
     }
+    const bool videoInput = video1 != nullptr || video2 != nullptr;
     const std::size_t expectedBytes =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
-    if (rgba1.size() != expectedBytes || rgba2.size() != expectedBytes) {
+    if ((!videoInput && (rgba1.size() != expectedBytes || rgba2.size() != expectedBytes)) ||
+        (videoInput && (video1 == nullptr || video2 == nullptr))) {
         throw std::runtime_error(
             "RGBA8 comparison buffer size does not match width and height");
+    }
+    if (videoInput && collectDebugData) {
+        throw std::runtime_error("debug dumps are not supported for Vulkan Video frames");
     }
     const auto comparisonStartedAt = std::chrono::steady_clock::now();
 
@@ -2440,7 +3005,7 @@ RgbaPairComparisonResult CompareRgba8Pair(
     // Identical input produces score 0 by definition (matches reference behavior).
     // GPU dispatches may introduce f32 non-determinism between separate runs,
     // so we detect this case on the CPU side.
-    const bool identicalInput = std::equal(rgba1.begin(), rgba1.end(), rgba2.begin());
+    const bool identicalInput = !videoInput && std::equal(rgba1.begin(), rgba1.end(), rgba2.begin());
 
     RgbaPairComparisonResult result;
     MultiScaleOutputs& compute = result.compute;
@@ -2512,7 +3077,9 @@ RgbaPairComparisonResult CompareRgba8Pair(
                 rgba1,
                 rgba2,
                 pyramidWidths,
-                pyramidHeights);
+                pyramidHeights,
+                video1,
+                video2);
     }
 
     for (const ScaleOutputs& scale : compute.scales) {
@@ -2584,10 +3151,397 @@ RgbaPairComparisonResult CompareRgba8Pair(
     return result;
 }
 
+struct OwnedVulkanVideoFrame {
+    AVFrame* owner = nullptr;
+    VulkanVideoFrame view{};
+    std::size_t frameNumber = 0;
+
+    OwnedVulkanVideoFrame() = default;
+    OwnedVulkanVideoFrame(const OwnedVulkanVideoFrame&) = delete;
+    OwnedVulkanVideoFrame& operator=(const OwnedVulkanVideoFrame&) = delete;
+    OwnedVulkanVideoFrame(OwnedVulkanVideoFrame&& other) noexcept
+        : owner(std::exchange(other.owner, nullptr)), view(other.view) {
+        frameNumber = other.frameNumber;
+        if (owner != nullptr) {
+            view.frame = owner;
+            view.vkFrame = reinterpret_cast<AVVkFrame*>(owner->data[0]);
+            view.framesContext = owner->hw_frames_ctx == nullptr
+                                     ? nullptr
+                                     : reinterpret_cast<AVHWFramesContext*>(owner->hw_frames_ctx->data);
+        }
+        other.view = {};
+        other.frameNumber = 0;
+    }
+    OwnedVulkanVideoFrame& operator=(OwnedVulkanVideoFrame&& other) noexcept {
+        if (this != &other) {
+            av_frame_free(&owner);
+            owner = std::exchange(other.owner, nullptr);
+            view = other.view;
+            frameNumber = other.frameNumber;
+            if (owner != nullptr) {
+                view.frame = owner;
+                view.vkFrame = reinterpret_cast<AVVkFrame*>(owner->data[0]);
+                view.framesContext = owner->hw_frames_ctx == nullptr
+                                         ? nullptr
+                                         : reinterpret_cast<AVHWFramesContext*>(owner->hw_frames_ctx->data);
+            }
+            other.view = {};
+            other.frameNumber = 0;
+        }
+        return *this;
+    }
+    ~OwnedVulkanVideoFrame() { av_frame_free(&owner); }
+
+    static OwnedVulkanVideoFrame Clone(const VulkanVideoFrame& source) {
+        if (source.frame == nullptr) {
+            throw std::runtime_error("cannot clone an empty Vulkan Video frame");
+        }
+        OwnedVulkanVideoFrame result;
+        result.owner = av_frame_clone(source.frame);
+        if (result.owner == nullptr) {
+            throw std::runtime_error("av_frame_clone failed for Vulkan Video frame");
+        }
+        result.view = source;
+        result.view.frame = result.owner;
+        result.view.vkFrame = reinterpret_cast<AVVkFrame*>(result.owner->data[0]);
+        result.view.framesContext = result.owner->hw_frames_ctx == nullptr
+                                        ? nullptr
+                                        : reinterpret_cast<AVHWFramesContext*>(result.owner->hw_frames_ctx->data);
+        return result;
+    }
+};
+
+struct VideoDecodePipeline {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::array<std::deque<OwnedVulkanVideoFrame>, 2> frames;
+    std::size_t inFlight = 0;
+    std::array<bool, 2> finished = {false, false};
+    std::array<bool, 2> decoding = {false, false};
+    bool stopRequested = false;
+    std::exception_ptr error;
+};
+
+void RunVideoComparison(
+    GpuSession& session,
+    const CliOptions& options,
+    const ComparisonRequest& request) {
+    if (!IsVideoPath(request.image1.string()) || !IsVideoPath(request.image2.string())) {
+        if (options.csvEnabled) {
+            throw std::runtime_error("--csv is only supported for video comparisons");
+        }
+        throw std::runtime_error("video comparison requires two video paths");
+    }
+    if (!session.videoSupported) {
+        throw std::runtime_error(
+            "selected Vulkan device does not expose the Vulkan Video decode extensions/queue");
+    }
+
+    const VulkanInteropContext interop = {
+        .instance = session.instance,
+        .physicalDevice = session.physicalDevice,
+        .device = session.device,
+        .computeQueueFamily = session.queueFamilyIndex,
+        .decodeQueueFamily = session.videoDecodeQueueFamilyIndex,
+        .computeQueueFlags = session.computeQueueFlags,
+        .decodeQueueFlags = session.videoDecodeQueueFlags,
+        .decodeVideoCaps = session.videoDecodeCaps,
+        .enabledDeviceExtensions = session.videoDeviceExtensions,
+    };
+    const auto videoDevice = VulkanVideoDevice::Create(interop);
+
+    double totalScore = 0.0;
+    std::size_t frameCount = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    RgbaPairComparisonResult lastComparison;
+    ProfilingSummary totalProfiling;
+    std::ofstream csvOutput;
+    if (options.csvEnabled) {
+        const auto csvParent = options.csv.parent_path();
+        if (!csvParent.empty()) {
+            std::filesystem::create_directories(csvParent);
+        }
+        csvOutput.open(options.csv, std::ios::out | std::ios::trunc);
+        if (!csvOutput) {
+            throw std::runtime_error("failed to open video CSV output: " + options.csv.string());
+        }
+        csvOutput << "time_seconds,frame_number,dssim\n";
+        csvOutput << std::fixed << std::setprecision(9);
+    }
+    const auto videoStartedAt = std::chrono::steady_clock::now();
+    double videoTimestampOrigin = std::numeric_limits<double>::quiet_NaN();
+    VideoDecodePipeline decodePipeline;
+    const std::size_t pipelineDepth = options.pipelineDepth;
+    const std::array<std::string, 2> videoPaths = {
+        request.image1.string(),
+        request.image2.string(),
+    };
+    const auto decodeStream = [&](std::size_t streamIndex) {
+        try {
+            {
+                std::lock_guard lock(decodePipeline.mutex);
+                decodePipeline.decoding[streamIndex] = true;
+            }
+            decodePipeline.condition.notify_all();
+            VulkanVideoReader reader;
+            reader.Open(videoPaths[streamIndex], videoDevice);
+
+            std::size_t frameNumber = 0;
+            for (;;) {
+                bool reservedPipelineSlot = false;
+                {
+                    std::unique_lock lock(decodePipeline.mutex);
+                    if (streamIndex == 0u) {
+                        decodePipeline.condition.wait(lock, [&] {
+                            return decodePipeline.stopRequested ||
+                                   decodePipeline.inFlight < pipelineDepth;
+                        });
+                        if (decodePipeline.stopRequested) {
+                            break;
+                        }
+                        ++decodePipeline.inFlight;
+                        reservedPipelineSlot = true;
+                    } else {
+                        decodePipeline.condition.wait(lock, [&] {
+                            return decodePipeline.stopRequested ||
+                                   decodePipeline.frames[streamIndex].size() < pipelineDepth;
+                        });
+                        if (decodePipeline.stopRequested) {
+                            break;
+                        }
+                    }
+                    decodePipeline.decoding[streamIndex] = true;
+                }
+
+                VulkanVideoFrame decoded;
+                const bool hasFrame = reader.Next(decoded);
+                if (!hasFrame) {
+                    std::lock_guard lock(decodePipeline.mutex);
+                    decodePipeline.decoding[streamIndex] = false;
+                    decodePipeline.finished[streamIndex] = true;
+                    if (reservedPipelineSlot) {
+                        --decodePipeline.inFlight;
+                    }
+                    decodePipeline.condition.notify_all();
+                    break;
+                }
+
+                OwnedVulkanVideoFrame owned = OwnedVulkanVideoFrame::Clone(decoded);
+                owned.frameNumber = frameNumber++;
+                {
+                    std::lock_guard lock(decodePipeline.mutex);
+                    if (decodePipeline.stopRequested) {
+                        break;
+                    }
+                    decodePipeline.decoding[streamIndex] = false;
+                    decodePipeline.frames[streamIndex].emplace_back(std::move(owned));
+                }
+                decodePipeline.condition.notify_all();
+            }
+        } catch (...) {
+            std::lock_guard lock(decodePipeline.mutex);
+            if (decodePipeline.error == nullptr) {
+                decodePipeline.error = std::current_exception();
+            }
+            decodePipeline.stopRequested = true;
+            decodePipeline.decoding[streamIndex] = false;
+            decodePipeline.finished[streamIndex] = true;
+        }
+        {
+            std::lock_guard lock(decodePipeline.mutex);
+            decodePipeline.decoding[streamIndex] = false;
+            decodePipeline.finished[streamIndex] = true;
+        }
+        decodePipeline.condition.notify_all();
+    };
+
+    std::array<std::thread, 2> decodeThreads = {
+        std::thread(decodeStream, 0u),
+        std::thread(decodeStream, 1u),
+    };
+
+    const auto stopDecodeThreads = [&] {
+        {
+            std::lock_guard lock(decodePipeline.mutex);
+            decodePipeline.stopRequested = true;
+        }
+        decodePipeline.condition.notify_all();
+        for (std::thread& thread : decodeThreads) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    };
+
+    try {
+        for (;;) {
+            OwnedVulkanVideoFrame frame1;
+            OwnedVulkanVideoFrame frame2;
+            {
+                std::unique_lock lock(decodePipeline.mutex);
+                decodePipeline.condition.wait(lock, [&] {
+                    const bool unmatchedQueuedFrame =
+                        (decodePipeline.finished[0] && decodePipeline.frames[0].empty() &&
+                         !decodePipeline.frames[1].empty()) ||
+                        (decodePipeline.finished[1] && decodePipeline.frames[1].empty() &&
+                         !decodePipeline.frames[0].empty());
+                    return decodePipeline.error != nullptr ||
+                           (!decodePipeline.frames[0].empty() &&
+                            !decodePipeline.frames[1].empty()) ||
+                           unmatchedQueuedFrame ||
+                           (decodePipeline.finished[0] && decodePipeline.finished[1]);
+                });
+                if (decodePipeline.error != nullptr) {
+                    std::rethrow_exception(decodePipeline.error);
+                }
+                if (decodePipeline.frames[0].empty() || decodePipeline.frames[1].empty()) {
+                    if (decodePipeline.finished[0] && decodePipeline.finished[1]) {
+                        if (!decodePipeline.frames[0].empty() ||
+                            !decodePipeline.frames[1].empty()) {
+                            throw std::runtime_error("videos have different decoded frame counts");
+                        }
+                        break;
+                    }
+                    if ((decodePipeline.finished[0] && decodePipeline.frames[0].empty() &&
+                         !decodePipeline.frames[1].empty()) ||
+                        (decodePipeline.finished[1] && decodePipeline.frames[1].empty() &&
+                         !decodePipeline.frames[0].empty())) {
+                        throw std::runtime_error("videos have different decoded frame counts");
+                    }
+                    continue;
+                }
+                frame1 = std::move(decodePipeline.frames[0].front());
+                frame2 = std::move(decodePipeline.frames[1].front());
+                decodePipeline.frames[0].pop_front();
+                decodePipeline.frames[1].pop_front();
+            }
+            decodePipeline.condition.notify_all();
+
+            if (frame1.frameNumber != frameCount || frame2.frameNumber != frameCount) {
+                throw std::runtime_error("video pipeline frame dependency/order was violated");
+            }
+            if (frame1.view.width != frame2.view.width ||
+                frame1.view.height != frame2.view.height) {
+                throw std::runtime_error("video frames have different dimensions");
+            }
+            if (frame1.view.softwareFormat != AV_PIX_FMT_NV12 &&
+                frame1.view.softwareFormat != AV_PIX_FMT_P010LE &&
+                frame1.view.softwareFormat != AV_PIX_FMT_P010BE) {
+                throw std::runtime_error(
+                    "unsupported Vulkan Video output format; expected NV12 or P010");
+            }
+            if (frame2.view.softwareFormat != AV_PIX_FMT_NV12 &&
+                frame2.view.softwareFormat != AV_PIX_FMT_P010LE &&
+                frame2.view.softwareFormat != AV_PIX_FMT_P010BE) {
+                throw std::runtime_error(
+                    "unsupported Vulkan Video output format; expected NV12 or P010");
+            }
+            width = frame1.view.width;
+            height = frame1.view.height;
+            RgbaPairComparisonResult comparison = CompareRgba8Pair(
+                session,
+                {},
+                {},
+                width,
+                height,
+                false,
+                &frame1.view,
+                &frame2.view);
+            totalScore += comparison.compute.score;
+            lastComparison = std::move(comparison);
+            totalProfiling.decodeDoneToScoreMs += lastComparison.profiling.decodeDoneToScoreMs;
+            totalProfiling.dispatchAndSubmitTime += lastComparison.profiling.dispatchAndSubmitTime;
+            totalProfiling.readbackTime += lastComparison.profiling.readbackTime;
+            totalProfiling.postProcessTime += lastComparison.profiling.postProcessTime;
+            totalProfiling.otherTime += lastComparison.profiling.otherTime;
+            totalProfiling.gpuTimestampMs += lastComparison.profiling.gpuTimestampMs;
+            const std::size_t frameNumber = frame1.frameNumber;
+            ++frameCount;
+            if (std::isnan(videoTimestampOrigin)) {
+                videoTimestampOrigin = frame1.view.timestampSeconds;
+            }
+            const double videoTimeSeconds =
+                std::max(0.0, frame1.view.timestampSeconds - videoTimestampOrigin);
+            const double elapsedSeconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - videoStartedAt).count();
+            const double processingFps = elapsedSeconds > 0.0
+                                             ? static_cast<double>(frameCount) / elapsedSeconds
+                                             : 0.0;
+            const double runningAverage = totalScore / static_cast<double>(frameCount);
+            if (csvOutput) {
+                csvOutput << videoTimeSeconds << ',' << frameNumber << ','
+                          << lastComparison.compute.score << '\n';
+            }
+            std::cerr << '\r' << std::fixed << std::setprecision(3)
+                      << "[video] fps=" << processingFps
+                      << " frames=" << frameCount
+                      << " elapsed_s=" << elapsedSeconds
+                      << " last_frame_dssim=" << std::setprecision(8)
+                      << lastComparison.compute.score
+                      << " average_dssim=" << runningAverage << std::flush;
+            {
+                std::lock_guard lock(decodePipeline.mutex);
+                --decodePipeline.inFlight;
+            }
+            decodePipeline.condition.notify_all();
+        }
+        stopDecodeThreads();
+    } catch (...) {
+        stopDecodeThreads();
+        throw;
+    }
+    if (frameCount == 0) {
+        throw std::runtime_error("no decodable Vulkan Video frames were found");
+    }
+    std::cerr << '\n';
+
+    const double averageScore = totalScore / static_cast<double>(frameCount);
+    lastComparison.compute.score = averageScore;
+    lastComparison.compute.weightedSsim = 1.0 / (1.0 + averageScore);
+    const DecodedInputInfo decoded1 = {
+        .width = width,
+        .height = height,
+        .channels = 4,
+        .byteCount = static_cast<std::size_t>(width) * height * 4u,
+    };
+    const DecodedInputInfo decoded2 = decoded1;
+    CliOptions resultOptions = options;
+    resultOptions.image1 = request.image1;
+    resultOptions.image2 = request.image2;
+    if (!resultOptions.out.empty()) {
+        WriteStringFile(
+            resultOptions.out,
+            BuildJson(
+                resultOptions,
+                session.adapterName,
+                decoded1,
+                decoded2,
+                lastComparison.compute,
+                totalProfiling,
+                nullptr));
+    }
+    std::cout << std::fixed << std::setprecision(8) << averageScore << '\t'
+              << resultOptions.image2.string() << "\tframes=" << frameCount << '\n';
+    if (options.profilingEnabled) {
+        PrintProfilingBuckets(
+            BuildRuntimeProfilingBuckets(totalProfiling),
+            "[profiling] ",
+            "video_");
+    }
+}
+
 void RunComparison(
     GpuSession& session,
     const CliOptions& options,
     const ComparisonRequest& request) {
+    if (IsVideoPath(request.image1.string()) || IsVideoPath(request.image2.string())) {
+        RunVideoComparison(session, options, request);
+        return;
+    }
+    if (options.csvEnabled) {
+        throw std::runtime_error("--csv is only supported for video comparisons");
+    }
     const DecodedImage image1 = LoadPngRgba8(request.image1);
     const DecodedImage image2 = LoadPngRgba8(request.image2);
     if (image1.pixels.empty() || image2.pixels.empty()) {
@@ -2700,11 +3654,13 @@ int main(int argc, char** argv) {
         const auto labPreprocessShaderPath = ResolveShaderPath(argv[0], "lab_preprocess.spv");
         const auto downsampleShaderPath = ResolveShaderPath(argv[0], "downsample_2x2.spv");
         const auto rgba8ToLinearShaderPath = ResolveShaderPath(argv[0], "rgba8_to_linear.spv");
+        const auto vulkanYuvToRgbaShaderPath = ResolveShaderPath(argv[0], "vulkan_yuv_to_rgba8.spv");
         const auto stage0Spirv = ReadSpirv(stage0ShaderPath);
         const auto stage0ScoreSpirv = ReadSpirv(stage0ScoreShaderPath);
         const auto labPreprocessSpirv = ReadSpirv(labPreprocessShaderPath);
         const auto downsampleSpirv = ReadSpirv(downsampleShaderPath);
         const auto rgba8ToLinearSpirv = ReadSpirv(rgba8ToLinearShaderPath);
+        const auto vulkanYuvToRgbaSpirv = ReadSpirv(vulkanYuvToRgbaShaderPath);
         auto session =
             CreateGpuSession(
                 labPreprocessSpirv,
@@ -2712,6 +3668,7 @@ int main(int argc, char** argv) {
                 stage0ScoreSpirv,
                 downsampleSpirv,
                 rgba8ToLinearSpirv,
+                vulkanYuvToRgbaSpirv,
                 options.debugDumpEnabled,
                 options.profilingEnabled || !options.out.empty());
         if (options.profilingEnabled) {
