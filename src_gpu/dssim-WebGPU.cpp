@@ -27,6 +27,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "cli_options.h"
 #include "png_loader.h"
 #include "video_decoder.h"
 using namespace std::chrono;
@@ -44,25 +45,6 @@ struct LinearRgba {
     float g;
     float b;
     float a;
-};
-
-struct CliOptions {
-    std::filesystem::path image1;
-    std::filesystem::path image2;
-    std::filesystem::path out;
-    std::filesystem::path csv;
-    std::filesystem::path debugDumpDir;
-    bool debugDumpEnabled = false;
-    bool stdinPairsMode = false;
-    bool profilingEnabled = false;
-    bool csvEnabled = false;
-    std::size_t pipelineDepth = 3;
-    bool pipelineDepthExplicit = false;
-};
-
-struct ComparisonRequest {
-    std::filesystem::path image1;
-    std::filesystem::path image2;
 };
 
 struct ScaleOutputs {
@@ -366,145 +348,6 @@ std::filesystem::path ResolveShaderPath(
         message << " " << candidate.string();
     }
     throw std::runtime_error(message.str());
-}
-
-CliOptions ParseArgs(int argc, char** argv) {
-    CliOptions options;
-    int positionalCount = 0;
-
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-
-        if (arg == "--stdin-pairs") {
-            options.stdinPairsMode = true;
-            continue;
-        }
-        if (arg == "--profiling") {
-            options.profilingEnabled = true;
-            continue;
-        }
-
-        if (arg == "--pipeline-depth") {
-            if (i + 1 >= argc) {
-                throw std::runtime_error("missing value for --pipeline-depth");
-            }
-            const std::string value = argv[++i];
-            try {
-                std::size_t parsedChars = 0;
-                const unsigned long long parsed = std::stoull(value, &parsedChars);
-                if (parsedChars != value.size() || parsed == 0u ||
-                    parsed > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
-                    throw std::runtime_error("invalid value");
-                }
-                options.pipelineDepth = static_cast<std::size_t>(parsed);
-                options.pipelineDepthExplicit = true;
-            } catch (const std::exception&) {
-                throw std::runtime_error("--pipeline-depth must be a positive integer");
-            }
-            continue;
-        }
-        if (arg.rfind("--pipeline-depth=", 0) == 0) {
-            const std::string value = arg.substr(std::string("--pipeline-depth=").size());
-            try {
-                std::size_t parsedChars = 0;
-                const unsigned long long parsed = std::stoull(value, &parsedChars);
-                if (parsedChars != value.size() || parsed == 0u ||
-                    parsed > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
-                    throw std::runtime_error("invalid value");
-                }
-                options.pipelineDepth = static_cast<std::size_t>(parsed);
-                options.pipelineDepthExplicit = true;
-            } catch (const std::exception&) {
-                throw std::runtime_error("--pipeline-depth must be a positive integer");
-            }
-            continue;
-        }
-
-        if (arg == "--out") {
-            if (i + 1 >= argc) {
-                throw std::runtime_error("missing value for --out");
-            }
-            options.out = argv[++i];
-            continue;
-        }
-        if (arg.rfind("--out=", 0) == 0) {
-            options.out = arg.substr(std::string("--out=").size());
-            continue;
-        }
-
-        if (arg == "--csv") {
-            if (i + 1 >= argc) {
-                throw std::runtime_error("missing value for --csv");
-            }
-            options.csv = argv[++i];
-            options.csvEnabled = true;
-            continue;
-        }
-        if (arg.rfind("--csv=", 0) == 0) {
-            options.csv = arg.substr(std::string("--csv=").size());
-            options.csvEnabled = true;
-            continue;
-        }
-
-        if (arg == "--debug-dump-dir") {
-            if (i + 1 >= argc) {
-                throw std::runtime_error("missing value for --debug-dump-dir");
-            }
-            options.debugDumpDir = argv[++i];
-            options.debugDumpEnabled = true;
-            continue;
-        }
-        if (arg.rfind("--debug-dump-dir=", 0) == 0) {
-            options.debugDumpDir = arg.substr(std::string("--debug-dump-dir=").size());
-            options.debugDumpEnabled = true;
-            continue;
-        }
-
-        if (!arg.empty() && arg[0] != '-') {
-            if (positionalCount == 0) {
-                options.image1 = arg;
-            } else if (positionalCount == 1) {
-                options.image2 = arg;
-            } else {
-                throw std::runtime_error("too many positional arguments");
-            }
-            ++positionalCount;
-            continue;
-        }
-
-        throw std::runtime_error("unknown argument: " + arg);
-    }
-
-    if (options.debugDumpEnabled && options.debugDumpDir.empty()) {
-        throw std::runtime_error("empty --debug-dump-dir");
-    }
-    if (options.csvEnabled && options.csv.empty()) {
-        throw std::runtime_error("empty --csv path");
-    }
-    if (options.stdinPairsMode) {
-        if (positionalCount != 0) {
-            throw std::runtime_error("--stdin-pairs does not accept positional image arguments");
-        }
-        if (!options.out.empty()) {
-            throw std::runtime_error("--stdin-pairs cannot be combined with --out");
-        }
-        if (options.csvEnabled) {
-            throw std::runtime_error("--stdin-pairs cannot be combined with --csv");
-        }
-        if (options.debugDumpEnabled) {
-            throw std::runtime_error("--stdin-pairs cannot be combined with --debug-dump-dir");
-        }
-        if (options.pipelineDepthExplicit) {
-            throw std::runtime_error("--stdin-pairs cannot be combined with --pipeline-depth");
-        }
-    } else if (positionalCount != 2) {
-        throw std::runtime_error(
-            "usage: dssim-WebGPU <img1> <img2> [--out <json>] "
-            "[--csv <path>] [--pipeline-depth <N>] [--debug-dump-dir <dir>] "
-            "[--stdin-pairs] [--profiling]");
-    }
-
-    return options;
 }
 
 float SrgbToLinear(float c) {
@@ -2959,20 +2802,6 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     return session;
 }
 
-ComparisonRequest ParseComparisonRequestLine(const std::string& line) {
-    const std::size_t separator = line.find('\t');
-    if (separator == std::string::npos) {
-        throw std::runtime_error("stdin pair line must be tab-delimited: <img1>\\t<img2>");
-    }
-    if (separator == 0 || separator + 1 >= line.size()) {
-        throw std::runtime_error("stdin pair line contains an empty image path");
-    }
-    return {
-        .image1 = line.substr(0, separator),
-        .image2 = line.substr(separator + 1),
-    };
-}
-
 ProfilingBuckets BuildRuntimeProfilingBuckets(const ProfilingSummary& profiling) {
     return {
         .totalMs = static_cast<double>(profiling.decodeDoneToScoreMs),
@@ -3059,11 +2888,6 @@ RgbaPairComparisonResult CompareRgba8Pair(
         linear2 = ConvertRgba8ToLinearPlu(rgba2);
         linear1 = input1Future.get();
     }
-
-    // Identical input produces score 0 by definition (matches reference behavior).
-    // GPU dispatches may introduce f32 non-determinism between separate runs,
-    // so we detect this case on the CPU side.
-    const bool identicalInput = !videoInput && std::equal(rgba1.begin(), rgba1.end(), rgba2.begin());
 
     RgbaPairComparisonResult result;
     MultiScaleOutputs& compute = result.compute;
@@ -3155,20 +2979,15 @@ RgbaPairComparisonResult CompareRgba8Pair(
         postProcessRemainingScalesMs += scale.postProcessRemainingScalesMs;
     }
 
-    if (identicalInput) {
-        compute.weightedSsim = 1.0;
-        compute.score = 0.0;
-    } else {
-        double weightedSum = 0.0;
-        double weightTotal = 0.0;
-        for (std::size_t i = 0; i < compute.scales.size(); ++i) {
-            const double w = kDefaultScaleWeights[i];
-            weightedSum += compute.scales[i].ssimScore * w;
-            weightTotal += w;
-        }
-        compute.weightedSsim = weightedSum / weightTotal;
-        compute.score = 1.0 / std::max(compute.weightedSsim, std::numeric_limits<double>::epsilon()) - 1.0;
+    double weightedSum = 0.0;
+    double weightTotal = 0.0;
+    for (std::size_t i = 0; i < compute.scales.size(); ++i) {
+        const double w = kDefaultScaleWeights[i];
+        weightedSum += compute.scales[i].ssimScore * w;
+        weightTotal += w;
     }
+    compute.weightedSsim = weightedSum / weightTotal;
+    compute.score = 1.0 / std::max(compute.weightedSsim, std::numeric_limits<double>::epsilon()) - 1.0;
 
     if (collectDebugData && pyramid1.size() > 1u && pyramid2.size() > 1u) {
         result.debugScale1Image1 = std::move(pyramid1[1]);

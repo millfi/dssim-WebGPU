@@ -74,6 +74,7 @@ else()
 endif()
 
 add_executable(dssim_webgpu
+    cli_options.cpp
     dssim-WebGPU.cpp
     png_loader.cpp
     video_decoder.cpp
