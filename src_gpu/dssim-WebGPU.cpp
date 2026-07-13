@@ -3617,8 +3617,15 @@ void RunVideoComparison(
                 csvOutput << videoTimeSeconds << ',' << frameNumber << ','
                           << lastComparison.compute.score << '\n';
             }
+            std::size_t currentPipelineDepth = 0;
+            {
+                std::lock_guard lock(decodePipeline.mutex);
+                currentPipelineDepth = decodePipeline.inFlight;
+            }
             std::cerr << '\r' << std::fixed << std::setprecision(3)
                       << "[video] fps=" << processingFps
+                      << " pipeline_depth=" << currentPipelineDepth
+                      << " pipeline_capacity=" << pipelineDepth
                       << " frames=" << frameCount
                       << " elapsed_s=" << elapsedSeconds
                       << " last_frame_dssim=" << std::setprecision(8)

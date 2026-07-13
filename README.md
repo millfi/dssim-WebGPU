@@ -1,8 +1,8 @@
 # dssim-WebGPU
 
-An optimized C++20/Vulkan implementation of the DSSIM image comparison
-algorithm. The executable and CMake target retain their existing names for
-command-line and build compatibility.
+An optimized C++20/Vulkan implementation of the DSSIM image and video
+comparison algorithm. The executable and CMake target retain their existing
+names for command-line and build compatibility.
 
 ## Requirements
 
@@ -15,6 +15,9 @@ command-line and build compatibility.
 - PowerShell
 - CMake 3.24 or newer
 - A C++20 compiler
+- For video comparison, a Vulkan Video decode queue and the codec extension for
+  each input (`VK_KHR_video_decode_h264`, `VK_KHR_video_decode_h265`,
+  `VK_KHR_video_decode_vp9`, or `VK_KHR_video_decode_av1`)
 
 The top-level CMake configuration selects C++20 automatically. No additional
 C++ standard flag is required.
@@ -23,25 +26,25 @@ CMake locates the SDK with `find_package(Vulkan REQUIRED COMPONENTS glslc)`.
 The standard Vulkan SDK installation sets `VULKAN_SDK`, which CMake can use to
 find these components. There is no automatic SDK download.
 
-Inputs may be same-size PNG images or same-resolution MP4/WebM videos. Video
-frames are decoded through FFmpeg's Vulkan Video H.264/HEVC/AV1/VP9 hwaccels as
-`AV_PIX_FMT_VULKAN`; the decoded Vulkan images are converted to RGBA8 on the
-GPU and never read back to CPU memory.
+Inputs may be same-size PNG images or a pair of videos. Video containers are
+recognized by the `.mp4`, `.m4v`, `.mov`, `.mkv`, and `.webm` extensions.
+Frames are decoded through FFmpeg's Vulkan Video H.264/HEVC/VP9/AV1 hwaccels as
+`AV_PIX_FMT_VULKAN`; the decoded Vulkan images are converted from NV12 or P010
+to RGBA8 on the GPU and are not read back to CPU memory.
 
 ## Build
 
-Run all repository commands from PowerShell:
-
-```powershell
-& cmake -S . -B build
-& cmake --build build --config Release --target dssim_webgpu
-```
-
-Build the minimal dynamically linked FFmpeg Vulkan Video distribution first
-when setting up video support:
+Run all repository commands from PowerShell. The target requires the minimal
+FFmpeg development files even when it will only compare PNG images. Build them
+once if `third_party/ffmpeg-8.1.2-shared` is not already present:
 
 ```powershell
 & .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic
+```
+
+Then configure and build normally:
+
+```powershell
 & cmake -S . -B build
 & cmake --build build --config Release --target dssim_webgpu
 ```
@@ -94,7 +97,44 @@ Add `--out <json>` for per-scale results and detailed timings:
 ```
 
 Add `--debug-dump-dir <directory>` to emit intermediate buffers used for
-score-matching investigations.
+score-matching investigations. This option is intended for PNG comparisons.
+
+## Compare videos
+
+Pass two video paths in the same way as an image pair:
+
+```powershell
+& .\build\src_gpu\Release\dssim-WebGPU.exe `
+    .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 `
+    .\benchmark\3s.webm `
+    --profiling `
+    --csv .\out\video_scores.csv
+```
+
+Both inputs must be videos. Corresponding decoded frames must have identical
+dimensions, and both videos must decode to the same number of frames. The
+program compares frames by zero-based decode order; it does not resample,
+retime, or align them by timestamp.
+
+During processing, stderr reports FPS, the current in-flight pipeline depth,
+its configured capacity, processed frame count, elapsed time, the latest frame
+DSSIM, and the running average DSSIM. On completion, stdout reports the average
+DSSIM across all frame pairs and `frames=<N>`:
+
+```text
+0.06837245    .\benchmark\3s.webm    frames=180
+```
+
+`--csv <path>` writes `time_seconds,frame_number,dssim`, with one data row per
+frame pair. `time_seconds` is based on the first video's timestamps relative to
+its first decoded frame. `--out <json>` writes the aggregate result and summed
+per-frame profiling values.
+
+Two dedicated FFmpeg decode threads feed the comparison pipeline. Use
+`--pipeline-depth <N>` to set the positive in-flight frame-pair limit; the
+default is 3. At startup, the program reports each codec and selected Vulkan
+Video queue family. It assigns the streams to different compatible queue
+families when possible; two AV1 streams use the primary queue family.
 
 ## Fixed multi-pair benchmark
 
@@ -113,7 +153,8 @@ modules, and creates the shader objects once, then reuses them for every pair.
 Image resolution is supplied through push constants and dispatch dimensions,
 so different resolutions do not require different shader objects.
 
-`--stdin-pairs` cannot be combined with `--out` or `--debug-dump-dir`.
+`--stdin-pairs` cannot be combined with `--out`, `--csv`,
+`--pipeline-depth`, or `--debug-dump-dir`.
 
 ## Mechanical score regression check
 
@@ -248,40 +289,11 @@ PowerShell with:
 & glslc --version
 ```
 
-Video comparison reports the number of decoded frame pairs:
-
-```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
-    .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 `
-    .\benchmark\3s.webm `
-    --profiling
-```
-
-During video comparison, stderr reports FPS, processed frame count, elapsed
-seconds, the most recently evaluated frame's DSSIM, and the running average
-DSSIM for every frame. Add `--csv <path>` to save one row per frame:
-
-```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
-    .\benchmark\video-a.webm `
-    .\benchmark\video-b.webm `
-    --csv .\out\video_scores.csv
-```
-
-The CSV columns are `time_seconds,frame_number,dssim`; frame numbers start at 0.
-Video decoding and comparison overlap through a frame-pair queue. Set the total
-in-flight frame-pair limit with `--pipeline-depth <N>`; the default is 3. `frame_number` identifies
-the same frame on the decode and comparison sides and is also used for ordering
-validation and CSV output.
-Each input video has its own dedicated FFmpeg decode thread.
-At startup, queue-family codec capabilities are queried and one stream is
-assigned to a different Vulkan Video queue family when possible. If both
-streams are AV1, they share the primary queue family.
-
 The build compiles these GLSL compute shaders to SPIR-V; shaders are not
 compiled at application startup:
 
 - `rgba8_to_linear.comp`
+- `vulkan_yuv_to_rgba8.comp`
 - `downsample_2x2.comp`
 - `lab_preprocess.comp`
 - `stage0_absdiff.comp`

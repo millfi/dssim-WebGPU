@@ -7,6 +7,9 @@
 - CMake sets this at the top level (`CMAKE_CXX_STANDARD=20`, `CMAKE_CXX_STANDARD_REQUIRED=ON`, `CMAKE_CXX_EXTENSIONS=OFF`).
 - Use PowerShell for every repository command. Do not provide Command Prompt, batch, Bash, or POSIX-shell commands.
 - Invoke executables and scripts with PowerShell's call operator (`&`) when appropriate.
+- `dssim_webgpu` always links the minimal FFmpeg Vulkan Video build under
+  `third_party/ffmpeg-8.1.2-shared`, including for PNG-only work. If it is absent,
+  create it with `& .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic` before configuring.
 
 ## Verification workflow
 
@@ -18,6 +21,42 @@
    - `Get-Content .\tests\test_pairs.txt | & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling`
 4. Mechanically compare scores with the original `dssim.exe` found on `PATH`:
    - `& .\tools\check_regression.ps1`
+
+The fixed regression list currently covers PNG comparisons. Changes to video
+decoding, Vulkan YUV conversion, frame scheduling, or video output also require
+the video verification workflow below; video checks do not replace the PNG
+regression check.
+
+## Video support and verification
+
+- Video inputs are recognized by `.mp4`, `.m4v`, `.mov`, `.mkv`, and `.webm`.
+- Supported codecs are H.264, HEVC, VP9, and AV1 through FFmpeg Vulkan Video.
+- Video comparison requires two video inputs with the same decoded frame count
+  and matching dimensions for every corresponding frame. Frames are paired by
+  zero-based decode order; do not describe the implementation as timestamp
+  alignment or frame-rate conversion.
+- The accepted decoded Vulkan formats are NV12 and P010. Conversion to RGBA8 is
+  performed by `vulkan_yuv_to_rgba8.comp` without CPU frame readback.
+- `--csv` is supported only for video comparisons, and `--pipeline-depth`
+  affects only the video pipeline. `--stdin-pairs` cannot be combined with
+  `--out`, `--csv`, `--pipeline-depth`, or `--debug-dump-dir`.
+
+For every video-affecting change:
+
+1. Build `dssim_webgpu` and run `& .\tools\check_regression.ps1`.
+2. Run the repository video pair with profiling and CSV output:
+   - `& .\build\src_gpu\Release\dssim-WebGPU.exe .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 .\benchmark\3s.webm --profiling --csv .\out\video_scores.csv`
+3. Require a successful exit, a finite average DSSIM, and a nonzero
+   `frames=<N>` value. Confirm that the CSV header is
+   `time_seconds,frame_number,dssim`, frame numbers are contiguous from 0, and
+   the number of data rows equals `N`.
+4. When changing pipeline scheduling, repeat the video comparison with at least
+   `--pipeline-depth 1` and the default depth 3. Scores and frame counts must be
+   identical; compare timings only after correctness is established.
+
+Do not add hand-authored video reference scores. If a stable video score
+regression is needed, implement a mechanical comparison against an appropriate
+reference executable or a reproducibly generated same-input result.
 
 ## Current priority: Performance optimization
 
@@ -56,6 +95,10 @@
 - The normal batch path keeps all scale levels on-GPU in one command buffer, one queue submission, and one readback. The debug path intentionally uses per-scale readback for intermediate statistics.
 - Upload, device-local workspace, and readback arenas are reused across `--stdin-pairs`; a larger comparison can still trigger arena growth.
 - Shader objects and layouts are created once per session. The preprocess and 5×5 SSIM dispatches remain the main GPU execution cost.
+- Video decoding uses one FFmpeg thread per input and overlaps decode with GPU
+  comparison through a bounded frame-pair queue (default depth 3). Preserve
+  frame ordering, bounded in-flight ownership, and decode-thread shutdown on
+  success and failure when optimizing this path.
 
 ## Score-matching workflow (reference — complete)
 
@@ -89,6 +132,9 @@
   - `create_shader_module_ms`, `create_pso_ms`, `create_buffer_ms`, `write_input_buffer_ms`, `create_pipeline_layout_ms`, `create_bind_group_ms`, `dispatch_and_submit_ms`, `readback_ms`, `gpu_submit_wait_ms`, `gpu_timestamp_ms`, `post_process_base_scale_ms`, `post_process_remaining_scales_ms`, `post_process_ms`
 - `dispatch_and_submit_ms` is CPU-side Vulkan command encoding/submission cost, not pure shader execution time.
 - `readback_ms` includes waiting for GPU work completion plus readback/map overhead.
+- Video profiling prefixes aggregate comparison buckets with `video_`; these are
+  sums across decoded frame pairs, while the reported video score is their
+  arithmetic mean.
 
 ## GPU dispatch constraints
 

@@ -1,6 +1,6 @@
 # dssim-WebGPU
 
-DSSIM画像比較アルゴリズムをC++20とVulkanで実装した高速化版です。
+DSSIM画像・動画比較アルゴリズムをC++20とVulkanで実装した高速化版です。
 コマンドラインとビルドの互換性を保つため、実行ファイル名とCMakeターゲット名は
 従来のまま維持しています。
 
@@ -17,6 +17,9 @@ DSSIM画像比較アルゴリズムをC++20とVulkanで実装した高速化版�
 - PowerShell
 - CMake 3.24以降
 - C++20対応コンパイラ
+- 動画比較では、Vulkan Video decode queueと、各入力codecに対応する
+  `VK_KHR_video_decode_h264`、`VK_KHR_video_decode_h265`、
+  `VK_KHR_video_decode_vp9`、または`VK_KHR_video_decode_av1`
 
 トップレベルのCMake設定が自動的にC++20を選択するため、ビルド時に
 C++標準の追加フラグを指定する必要はありません。
@@ -25,24 +28,25 @@ CMakeは`find_package(Vulkan REQUIRED COMPONENTS glslc)`でSDKを検出します
 通常のVulkan SDKインストールで設定される`VULKAN_SDK`をCMakeが利用できます。
 SDKを自動取得する処理はありません。
 
-入力は、同じ幅・高さの PNG 画像、または同じ解像度の MP4/WebM 動画です。
-動画は FFmpeg の Vulkan Video デコーダー（H.264/HEVC/AV1/VP9）で `AV_PIX_FMT_VULKAN`
-フレームとして受け取り、Vulkan image を GPU 内で YUV から RGBA8 へ変換して
-比較します。デコードフレームの CPU readback はありません。
+入力は、同じ幅・高さのPNG画像、または2本の動画です。動画コンテナは拡張子
+`.mp4`、`.m4v`、`.mov`、`.mkv`、`.webm`で判定します。FFmpegのVulkan Video
+デコーダー（H.264/HEVC/VP9/AV1）から`AV_PIX_FMT_VULKAN`フレームを受け取り、
+NV12またはP010のVulkan imageをGPU内でRGBA8へ変換します。デコードフレームの
+CPU readbackはありません。
 
 ## ビルド
 
-リポジトリ内のコマンドはすべてPowerShellから実行します。
-
-```powershell
-& cmake -S . -B build
-& cmake --build build --config Release --target dssim_webgpu
-```
-
-動画機能を含む初回ビルドでは、先に最小構成の動的 FFmpeg を生成します。
+リポジトリ内のコマンドはすべてPowerShellから実行します。PNGだけを比較する
+場合も、ターゲットのビルドには最小構成FFmpegの開発ファイルが必要です。
+`third_party/ffmpeg-8.1.2-shared`がない場合は、最初に一度生成します。
 
 ```powershell
 & .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic
+```
+
+その後は通常どおりconfigureとbuildを実行します。
+
+```powershell
 & cmake -S . -B build
 & cmake --build build --config Release --target dssim_webgpu
 ```
@@ -97,7 +101,44 @@ build\src_gpu\Release\shaders\*.spv
 ```
 
 スコア調査用の中間バッファを出力する場合は
-`--debug-dump-dir <ディレクトリ>` を指定します。
+`--debug-dump-dir <ディレクトリ>` を指定します。このオプションはPNG比較用です。
+
+## 動画を比較する
+
+画像ペアと同様に、2本の動画パスを指定します。
+
+```powershell
+& .\build\src_gpu\Release\dssim-WebGPU.exe `
+    .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 `
+    .\benchmark\3s.webm `
+    --profiling `
+    --csv .\out\video_scores.csv
+```
+
+両方の入力が動画である必要があります。対応するデコードフレームの幅と高さ、
+および両動画のデコードフレーム数が一致しなければエラーになります。比較は
+0始まりのデコード順で行い、timestampによる位置合わせ、retime、resampleは
+行いません。
+
+処理中はstderrへFPS、現在in-flightのpipeline depth、設定されたpipeline
+capacity、処理フレーム数、経過時間、直前フレームのDSSIM、累積平均DSSIMを
+表示します。完了時はstdoutへ全フレームペアの平均DSSIMと`frames=<N>`を
+表示します。
+
+```text
+0.06837245    .\benchmark\3s.webm    frames=180
+```
+
+`--csv <path>`は`time_seconds,frame_number,dssim`を、1フレームペアにつき1行
+出力します。`time_seconds`は1本目の動画の先頭デコードフレームを0秒とした
+timestampです。`--out <json>`は集約結果と、各フレームの値を合計した詳細な
+profiling値を出力します。
+
+2本の動画はそれぞれ専用のFFmpeg decode threadで処理され、比較pipelineへ
+渡されます。同時処理するフレームペア数は、正の整数を取る
+`--pipeline-depth <N>`で指定でき、既定値は3です。起動時に各codecと選択した
+Vulkan Video queue familyを表示します。可能なら2本を別々の対応queue familyへ
+割り当てますが、両方がAV1の場合はprimary queue familyを共有します。
 
 ## 固定の複数ペアベンチマーク
 
@@ -116,7 +157,8 @@ shader objectをプロセス内で一度だけ作成し、すべてのペアで�
 画像解像度はpush constantsとディスパッチ数で指定されるため、解像度が
 異なってもshader objectを作り直す必要はありません。
 
-`--stdin-pairs` は `--out` および `--debug-dump-dir` と同時には使えません。
+`--stdin-pairs` は `--out`、`--csv`、`--pipeline-depth`、
+`--debug-dump-dir` と同時には使えません。
 
 ## スコア回帰の自動確認
 
@@ -245,40 +287,11 @@ configureが明確なエラーで終了します。PowerShellからシェーダ�
 & glslc --version
 ```
 
-動画を比較すると、標準出力の末尾に比較フレーム数が表示されます。
-
-```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
-    .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 `
-    .\benchmark\3s.webm `
-    --profiling
-```
-
-動画比較では、処理中に stderr へ FPS、処理フレーム数、経過秒数、直前の
-DSSIM、累積平均 DSSIM がフレームごとに表示されます。各フレームの結果を
-CSVへ保存するには `--csv <path>` を追加します。
-
-```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
-    .\benchmark\video-a.webm `
-    .\benchmark\video-b.webm `
-    --csv .\out\video_scores.csv
-```
-
-CSV列は `time_seconds,frame_number,dssim` です。フレーム番号は0始まりです。
-
-動画のデコードと比較はフレームペアのキューを介してオーバーラップします。
-同時に保持・処理するフレームペア数は `--pipeline-depth <N>` で指定でき、既定値は3です。
-2本の動画はそれぞれ専用のデコードスレッドでFFmpegを呼び出します。
-起動時にキューファミリーのcodec能力を調べ、対応可能なら一方を別の
-Vulkan Videoキューファミリーへ割り当てます。両方がAV1の場合は同じキューを共有します。
-`frame_number` はデコード側と比較側の同じフレームを対応付ける識別子であり、
-並列処理中の順序検証とCSV出力にも使用します。
-
 ビルド時に次のGLSLコンピュートシェーダーをSPIR-Vへコンパイルします。
 アプリケーション起動時のシェーダーコンパイルは行いません。
 
 - `rgba8_to_linear.comp`
+- `vulkan_yuv_to_rgba8.comp`
 - `downsample_2x2.comp`
 - `lab_preprocess.comp`
 - `stage0_absdiff.comp`
