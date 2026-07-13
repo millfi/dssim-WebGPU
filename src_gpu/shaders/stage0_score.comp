@@ -66,14 +66,23 @@ void main() {
 
     float mu1_sq = dot(sum1, sum1) / 3.0;
     float mu2_sq = dot(sum2, sum2) / 3.0;
-    float mu1_mu2 = dot(sum1, sum2) / 3.0;
     float sigma1_sq = sumsq1 / 3.0 - mu1_sq;
     float sigma2_sq = sumsq2 / 3.0 - mu2_sq;
-    float sigma12 = sum12 / 3.0 - mu1_mu2;
+
+    vec3 mean_delta = sum1 - sum2;
+    float mean_delta_sq = dot(mean_delta, mean_delta) / 3.0;
+    float delta_second_moment =
+        ((sumsq1 - sum12) + (sumsq2 - sum12)) / 3.0;
+    float delta_variance = delta_second_moment - mean_delta_sq;
 
     float c1 = 0.01 * 0.01;
     float c2 = 0.03 * 0.03;
-    float numer = (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2);
-    float denom = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2);
-    out_ssim.values[i] = numer / denom;
+    float luminance_denom = mu1_sq + mu2_sq + c1;
+    float variance_denom = sigma1_sq + sigma2_sq + c2;
+    float loss_numer =
+        mean_delta_sq * variance_denom +
+        delta_variance * luminance_denom -
+        mean_delta_sq * delta_variance;
+    float denom = luminance_denom * variance_denom;
+    out_ssim.values[i] = 1.0 - loss_numer / denom;
 }

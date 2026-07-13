@@ -93,16 +93,32 @@ void main() {
 
     float mu1_sq = (mu1.x * mu1.x + mu1.y * mu1.y + mu1.z * mu1.z) / 3.0;
     float mu2_sq = (mu2.x * mu2.x + mu2.y * mu2.y + mu2.z * mu2.z) / 3.0;
-    float mu1_mu2 = (mu1.x * mu2.x + mu1.y * mu2.y + mu1.z * mu2.z) / 3.0;
     float sigma1_sq = (var1.x + var1.y + var1.z) / 3.0;
     float sigma2_sq = (var2.x + var2.y + var2.z) / 3.0;
-    float sigma12 = (cov12.x + cov12.y + cov12.z) / 3.0;
+
+    vec3 mean_delta = mu1 - mu2;
+    float mean_delta_sq =
+        (mean_delta.x * mean_delta.x +
+         mean_delta.y * mean_delta.y +
+         mean_delta.z * mean_delta.z) / 3.0;
+    vec3 delta_second_moment_components =
+        (sumsq1 - sum12) + (sumsq2 - sum12);
+    float delta_second_moment =
+        (delta_second_moment_components.x +
+         delta_second_moment_components.y +
+         delta_second_moment_components.z) / 3.0;
+    float delta_variance = delta_second_moment - mean_delta_sq;
 
     float c1 = 0.01 * 0.01;
     float c2 = 0.03 * 0.03;
-    float numer = (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2);
-    float denom = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2);
-    float ssim = numer / denom;
+    float luminance_denom = mu1_sq + mu2_sq + c1;
+    float variance_denom = sigma1_sq + sigma2_sq + c2;
+    float loss_numer =
+        mean_delta_sq * variance_denom +
+        delta_variance * luminance_denom -
+        mean_delta_sq * delta_variance;
+    float denom = luminance_denom * variance_denom;
+    float ssim = 1.0 - loss_numer / denom;
 
     out_ssim.values[i] = ssim;
     out_mu1.values[i] = mu1.x;

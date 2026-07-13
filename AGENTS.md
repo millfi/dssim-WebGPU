@@ -66,6 +66,10 @@ reference executable or a reproducibly generated same-input result.
 ### Regression tolerance
 
 - Same-image comparison must still produce `0.00000000`.
+- Do not implement special-case identical-input detection for images or videos
+  (including path equality, encoded/decoded byte comparison, or hashes), and do
+  not override the resulting score based on such a check. An identical-input
+  score of zero must emerge from the normal DSSIM computation path.
 - All other test pairs in `tests/test_pairs.txt`: **relative error < 1%** against the `dssim.exe` resolved from `PATH`.
 - After every optimization, re-run all pairs and confirm the tolerance holds before committing.
 - Do not replace the mechanical `dssim.exe` comparison with hand-edited reference scores.
