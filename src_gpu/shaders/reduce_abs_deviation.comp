@@ -1,0 +1,56 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer SsimValues {
+    float values[];
+} ssimValues;
+
+layout(set = 0, binding = 1, std430) readonly buffer SsimSum {
+    float value;
+} ssimSum;
+
+layout(set = 0, binding = 2, std430) writeonly buffer OutputSums {
+    float sums[];
+} outputSums;
+
+layout(push_constant) uniform Params {
+    uint len;
+    uint width;
+    uint height;
+    uint level;
+} params;
+
+shared float comparisonCenter;
+shared float partialSums[256];
+
+void main() {
+    const uint localIndex = gl_LocalInvocationIndex;
+    if (localIndex == 0) {
+        const float meanSsim = ssimSum.value / float(params.len);
+        comparisonCenter = pow(max(meanSsim, 0.0), exp2(-float(params.level)));
+    }
+    barrier();
+
+    const uvec2 pixel = gl_GlobalInvocationID.xy;
+    float value = 0.0;
+    if (pixel.x < params.width && pixel.y < params.height) {
+        value = abs(comparisonCenter -
+                    ssimValues.values[pixel.y * params.width + pixel.x]);
+    }
+    partialSums[localIndex] = value;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (localIndex < stride) {
+            partialSums[localIndex] += partialSums[localIndex + stride];
+        }
+        barrier();
+    }
+
+    if (localIndex == 0) {
+        const uint outputIndex =
+            gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+        outputSums.sums[outputIndex] = partialSums[0];
+    }
+}

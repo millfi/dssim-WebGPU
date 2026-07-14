@@ -246,6 +246,8 @@ struct GpuSession {
     ComputeShader preprocessShader;
     ComputeShader stage0Shader;
     ComputeShader stage0ScoreShader;
+    ComputeShader reduceSumShader;
+    ComputeShader reduceAbsDeviationShader;
     ComputeShader downsampleShader;
     ComputeShader rgba8ToLinearShader;
     ComputeShader vulkanYuvToRgbaShader;
@@ -866,6 +868,8 @@ GpuSession::~GpuSession() {
         DestroyComputeShader(*this, preprocessShader);
         DestroyComputeShader(*this, stage0Shader);
         DestroyComputeShader(*this, stage0ScoreShader);
+        DestroyComputeShader(*this, reduceSumShader);
+        DestroyComputeShader(*this, reduceAbsDeviationShader);
         DestroyComputeShader(*this, downsampleShader);
         DestroyComputeShader(*this, vulkanYuvToRgbaShader);
         if (videoYSampler != VK_NULL_HANDLE) {
@@ -1536,6 +1540,10 @@ struct BatchStageLayout {
     BufferRegion lab1;
     BufferRegion lab2;
     BufferRegion ssim;
+    BufferRegion reductionScratch1;
+    BufferRegion reductionScratch2;
+    std::array<BufferRegion, kDefaultScaleWeights.size()> ssimSums;
+    std::array<BufferRegion, kDefaultScaleWeights.size()> deviationSums;
     BufferRegion upload1;
     BufferRegion upload2;
     VkDeviceSize workspaceBytes = 0;
@@ -1547,7 +1555,9 @@ BatchStageLayout BuildBatchStageLayout(
     VkDeviceSize rgba8Bytes,
     VkDeviceSize inputBytes,
     VkDeviceSize downsampleBytes,
-    VkDeviceSize f32Bytes) {
+    VkDeviceSize f32Bytes,
+    VkDeviceSize reductionScratchBytes,
+    std::size_t levelCount) {
     ArenaBuilder workspace{
         .alignment = std::max<VkDeviceSize>(
             4u,
@@ -1563,6 +1573,12 @@ BatchStageLayout BuildBatchStageLayout(
     layout.lab1 = workspace.Add(inputBytes);
     layout.lab2 = workspace.Add(inputBytes);
     layout.ssim = workspace.Add(f32Bytes);
+    layout.reductionScratch1 = workspace.Add(reductionScratchBytes);
+    layout.reductionScratch2 = workspace.Add(reductionScratchBytes);
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        layout.ssimSums[level] = workspace.Add(sizeof(float));
+        layout.deviationSums[level] = workspace.Add(sizeof(float));
+    }
     layout.workspaceBytes = workspace.cursor;
 
     ArenaBuilder upload{.alignment = 4u};
@@ -1708,14 +1724,14 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     const VulkanVideoFrame* video1 = nullptr,
     const VulkanVideoFrame* video2 = nullptr) {
     const std::size_t levelCount = widths.size();
-    if (levelCount == 0 || heights.size() != levelCount) {
+    if (levelCount == 0 || levelCount > kDefaultScaleWeights.size() ||
+        heights.size() != levelCount) {
         throw std::runtime_error("invalid batch dimensions");
     }
 
-    constexpr VkDeviceSize kReadbackAlignment = 256u;
-    std::vector<VkDeviceSize> outputOffsets(levelCount);
+    std::vector<VkDeviceSize> sumOutputOffsets(levelCount);
+    std::vector<VkDeviceSize> deviationOutputOffsets(levelCount);
     std::vector<std::size_t> elemCounts(levelCount);
-    VkDeviceSize outputBytesTotal = 0;
     for (std::size_t level = 0; level < levelCount; ++level) {
         const std::size_t elemCount =
             static_cast<std::size_t>(widths[level]) * static_cast<std::size_t>(heights[level]);
@@ -1723,9 +1739,10 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             throw std::runtime_error("invalid or oversized pyramid level");
         }
         elemCounts[level] = elemCount;
-        outputOffsets[level] = outputBytesTotal;
-        outputBytesTotal += AlignUp(elemCount * sizeof(float), kReadbackAlignment);
+        sumOutputOffsets[level] = level * 2u * sizeof(float);
+        deviationOutputOffsets[level] = sumOutputOffsets[level] + sizeof(float);
     }
+    const VkDeviceSize outputBytesTotal = levelCount * 2u * sizeof(float);
 
     const std::size_t baseElemCount = elemCounts.front();
     const VkDeviceSize rgba8Bytes = baseElemCount * 4u;
@@ -1743,12 +1760,23 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     const VkDeviceSize downsampleBytes =
         ((levelCount > 1u) ? elemCounts[1] : 1u) * sizeof(LinearRgba);
     const VkDeviceSize baseF32Bytes = baseElemCount * sizeof(float);
+    const auto baseWorkgroups =
+        ComputeWorkgroupCounts(session, widths.front(), heights.front());
+    const VkDeviceSize reductionScratchBytes =
+        static_cast<VkDeviceSize>(baseWorkgroups[0]) * baseWorkgroups[1] * sizeof(float);
     ValidateStorageRange(session, rgba8Bytes, "packed RGBA8 input buffer");
     ValidateStorageRange(session, inputBytes, "linear RGBA/LAB buffer");
     ValidateStorageRange(session, downsampleBytes, "downsample buffer");
     ValidateStorageRange(session, baseF32Bytes, "SSIM output buffer");
+    ValidateStorageRange(session, reductionScratchBytes, "reduction scratch buffer");
     const BatchStageLayout layout = BuildBatchStageLayout(
-        session, rgba8Bytes, inputBytes, downsampleBytes, baseF32Bytes);
+        session,
+        rgba8Bytes,
+        inputBytes,
+        downsampleBytes,
+        baseF32Bytes,
+        reductionScratchBytes,
+        levelCount);
 
     std::vector<ScaleOutputs> outputs(levelCount);
     if (!session.batchStage0Resources ||
@@ -1872,8 +1900,6 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         .height = heights.front(),
         .qscale = kStage0QScale,
     };
-    const auto baseWorkgroups =
-        ComputeWorkgroupCounts(session, widths.front(), heights.front());
     const std::uint32_t baseWgX = baseWorkgroups[0];
     const std::uint32_t baseWgY = baseWorkgroups[1];
     const VkDescriptorBufferInfo lutDescriptor = {
@@ -1975,6 +2001,100 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
 
+    const auto recordSumReduction = [&](BufferRegion inputRegion,
+                                        std::uint32_t inputWidth,
+                                        std::uint32_t inputHeight,
+                                        const BufferRegion& finalOutput) {
+        bool writeScratch1 =
+            inputRegion.offset != layout.reductionScratch1.offset;
+        for (;;) {
+            const auto reductionWorkgroups =
+                ComputeWorkgroupCounts(session, inputWidth, inputHeight);
+            const std::uint32_t reductionWgX = reductionWorkgroups[0];
+            const std::uint32_t reductionWgY = reductionWorkgroups[1];
+            const bool finalPass = reductionWgX == 1u && reductionWgY == 1u;
+            const VkDeviceSize partialBytes =
+                static_cast<VkDeviceSize>(reductionWgX) * reductionWgY * sizeof(float);
+            const BufferRegion outputRegion = finalPass
+                                                  ? finalOutput
+                                                  : BufferRegion{
+                                                        (writeScratch1
+                                                             ? layout.reductionScratch1.offset
+                                                             : layout.reductionScratch2.offset),
+                                                        partialBytes};
+            const ParamsData reductionParams = {
+                .len = inputWidth * inputHeight,
+                .width = inputWidth,
+                .height = inputHeight,
+                .qscale = 0u,
+            };
+            BindShader(session, session.reduceSumShader);
+            const std::array<VkDescriptorBufferInfo, 2> descriptors = {{
+                DescribeBuffer(resources.workspace, inputRegion),
+                DescribeBuffer(resources.workspace, outputRegion),
+            }};
+            PushStorageDescriptors(session, session.reduceSumShader, descriptors);
+            PushParams(session, session.reduceSumShader, reductionParams);
+            vkCmdDispatch(session.commandBuffer, reductionWgX, reductionWgY, 1);
+            MemoryBarrier(
+                session.commandBuffer,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            if (finalPass) {
+                break;
+            }
+            inputRegion = outputRegion;
+            inputWidth = reductionWgX;
+            inputHeight = reductionWgY;
+            writeScratch1 = !writeScratch1;
+        }
+    };
+
+    const auto recordDeviationReduction = [&](const BufferRegion& ssimRegion,
+                                              std::uint32_t width,
+                                              std::uint32_t height,
+                                              std::uint32_t level,
+                                              const BufferRegion& sumResult,
+                                              const BufferRegion& deviationResult) {
+        const auto workgroups = ComputeWorkgroupCounts(session, width, height);
+        const std::uint32_t wgX = workgroups[0];
+        const std::uint32_t wgY = workgroups[1];
+        const bool finalPass = wgX == 1u && wgY == 1u;
+        const VkDeviceSize partialBytes =
+            static_cast<VkDeviceSize>(wgX) * wgY * sizeof(float);
+        const BufferRegion outputRegion = finalPass
+                                              ? deviationResult
+                                              : BufferRegion{
+                                                    layout.reductionScratch1.offset,
+                                                    partialBytes};
+        const ParamsData deviationParams = {
+            .len = width * height,
+            .width = width,
+            .height = height,
+            .qscale = level,
+        };
+        BindShader(session, session.reduceAbsDeviationShader);
+        const std::array<VkDescriptorBufferInfo, 3> descriptors = {{
+            DescribeBuffer(resources.workspace, ssimRegion),
+            DescribeBuffer(resources.workspace, sumResult),
+            DescribeBuffer(resources.workspace, outputRegion),
+        }};
+        PushStorageDescriptors(session, session.reduceAbsDeviationShader, descriptors);
+        PushParams(session, session.reduceAbsDeviationShader, deviationParams);
+        vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
+        MemoryBarrier(
+            session.commandBuffer,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        if (!finalPass) {
+            recordSumReduction(outputRegion, wgX, wgY, deviationResult);
+        }
+    };
+
     for (std::size_t level = 0; level < levelCount; ++level) {
         const VkDeviceSize rgbaBytes = elemCounts[level] * sizeof(LinearRgba);
         const VkDeviceSize f32Bytes = elemCounts[level] * sizeof(float);
@@ -2029,26 +2149,24 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         PushStorageDescriptors(session, session.stage0ScoreShader, scoreDescriptors);
         PushParams(session, session.stage0ScoreShader, params);
         vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
-        if (level + 1u == levelCount) {
-            EndTimestamp(session);
-        }
         MemoryBarrier(
             session.commandBuffer,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_READ_BIT);
-        const VkBufferCopy scoreCopy = {
-            .srcOffset = currentSsim.offset,
-            .dstOffset = outputOffsets[level],
-            .size = f32Bytes,
-        };
-        vkCmdCopyBuffer(
-            session.commandBuffer,
-            resources.workspace.buffer,
-            resources.readback.buffer,
-            1,
-            &scoreCopy);
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        recordSumReduction(
+            currentSsim,
+            widths[level],
+            heights[level],
+            layout.ssimSums[level]);
+        recordDeviationReduction(
+            currentSsim,
+            widths[level],
+            heights[level],
+            static_cast<std::uint32_t>(level),
+            layout.ssimSums[level],
+            layout.deviationSums[level]);
 
         if (level + 1u < levelCount) {
             const VkDeviceSize nextRgbaBytes = elemCounts[level + 1u] * sizeof(LinearRgba);
@@ -2093,6 +2211,33 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         }
     }
 
+    EndTimestamp(session);
+    MemoryBarrier(
+        session.commandBuffer,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT);
+    std::array<VkBufferCopy, kDefaultScaleWeights.size() * 2u> resultCopies{};
+    std::uint32_t resultCopyCount = 0;
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        resultCopies[resultCopyCount++] = {
+            .srcOffset = layout.ssimSums[level].offset,
+            .dstOffset = sumOutputOffsets[level],
+            .size = sizeof(float),
+        };
+        resultCopies[resultCopyCount++] = {
+            .srcOffset = layout.deviationSums[level].offset,
+            .dstOffset = deviationOutputOffsets[level],
+            .size = sizeof(float),
+        };
+    }
+    vkCmdCopyBuffer(
+        session.commandBuffer,
+        resources.workspace.buffer,
+        resources.readback.buffer,
+        resultCopyCount,
+        resultCopies.data());
     MemoryBarrier(
         session.commandBuffer,
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -2117,7 +2262,8 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     const auto readbackStartedAt = std::chrono::steady_clock::now();
     WaitForSubmission(session);
     InvalidateMappedBuffer(resources.readback);
-    const auto* ssimBytes = static_cast<const std::uint8_t*>(resources.readback.mapped);
+    const auto* reductionBytes =
+        static_cast<const std::uint8_t*>(resources.readback.mapped);
     outputs.front().gpuTimestampMs = ReadGpuTimestampMs(session);
     outputs.front().readback_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2129,46 +2275,32 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         output.width = widths[level];
         output.height = heights[level];
         output.elemCount = elemCounts[level];
-        const float* ssimValues = reinterpret_cast<const float*>(
-            ssimBytes + static_cast<std::size_t>(outputOffsets[level]));
-        const double ssimSum = SumF32(ssimValues, elemCounts[level]);
-        output.meanSsim = ssimSum / static_cast<double>(elemCounts[level]);
-        const double avg = std::pow(
-            std::max(output.meanSsim, 0.0),
-            std::pow(0.5, static_cast<double>(level)));
-        const double devSum =
-            SumAbsoluteDeviation(ssimValues, elemCounts[level], avg);
-        output.ssimScore = 1.0 - devSum / static_cast<double>(elemCounts[level]);
+        float ssimSum = 0.0f;
+        float deviationSum = 0.0f;
+        std::memcpy(
+            &ssimSum,
+            reductionBytes + static_cast<std::size_t>(sumOutputOffsets[level]),
+            sizeof(ssimSum));
+        std::memcpy(
+            &deviationSum,
+            reductionBytes + static_cast<std::size_t>(deviationOutputOffsets[level]),
+            sizeof(deviationSum));
+        output.meanSsim =
+            static_cast<double>(ssimSum) / static_cast<double>(elemCounts[level]);
+        output.ssimScore =
+            1.0 - static_cast<double>(deviationSum) /
+                      static_cast<double>(elemCounts[level]);
     };
-    if (levelCount > 1u && baseElemCount >= 65536u) {
-        auto remainingLevels = std::async(std::launch::async, [&] {
-            const auto startedAt = std::chrono::steady_clock::now();
-            for (std::size_t level = 1; level < levelCount; ++level) {
-                processLevel(level);
-            }
-            return std::chrono::duration<double, std::milli>(
-                       std::chrono::steady_clock::now() - startedAt)
-                .count();
-        });
-        const auto baseScaleStartedAt = std::chrono::steady_clock::now();
-        processLevel(0);
-        outputs.front().postProcessBaseScaleMs =
-            std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - baseScaleStartedAt)
-                .count();
-        outputs.front().postProcessRemainingScalesMs = remainingLevels.get();
-    } else {
-        for (std::size_t level = 0; level < levelCount; ++level) {
-            const auto levelStartedAt = std::chrono::steady_clock::now();
-            processLevel(level);
-            const double levelMs = std::chrono::duration<double, std::milli>(
-                                       std::chrono::steady_clock::now() - levelStartedAt)
-                                       .count();
-            if (level == 0u) {
-                outputs.front().postProcessBaseScaleMs = levelMs;
-            } else {
-                outputs.front().postProcessRemainingScalesMs += levelMs;
-            }
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        const auto levelStartedAt = std::chrono::steady_clock::now();
+        processLevel(level);
+        const double levelMs = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - levelStartedAt)
+                                   .count();
+        if (level == 0u) {
+            outputs.front().postProcessBaseScaleMs = levelMs;
+        } else {
+            outputs.front().postProcessRemainingScalesMs += levelMs;
         }
     }
     outputs.front().postProcess_time =
@@ -2502,6 +2634,8 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     std::span<const std::uint32_t> labPreprocessSpirv,
     std::span<const std::uint32_t> stage0Spirv,
     std::span<const std::uint32_t> stage0ScoreSpirv,
+    std::span<const std::uint32_t> reduceSumSpirv,
+    std::span<const std::uint32_t> reduceAbsDeviationSpirv,
     std::span<const std::uint32_t> downsampleSpirv,
     std::span<const std::uint32_t> rgba8ToLinearSpirv,
     std::span<const std::uint32_t> vulkanYuvToRgbaSpirv,
@@ -2754,6 +2888,10 @@ std::unique_ptr<GpuSession> CreateGpuSession(
         CreateComputeShader(*session, labPreprocessSpirv, 2);
     session->stage0ScoreShader =
         CreateComputeShader(*session, stage0ScoreSpirv, 3);
+    session->reduceSumShader =
+        CreateComputeShader(*session, reduceSumSpirv, 2);
+    session->reduceAbsDeviationShader =
+        CreateComputeShader(*session, reduceAbsDeviationSpirv, 3);
     if (enableDebugPipeline) {
         session->stage0Shader =
             CreateComputeShader(*session, stage0Spirv, 8);
@@ -3621,12 +3759,17 @@ int main(int argc, char** argv) {
         const CliOptions options = ParseArgs(argc, argv);
         const auto stage0ShaderPath = ResolveShaderPath(argv[0], "stage0_absdiff.spv");
         const auto stage0ScoreShaderPath = ResolveShaderPath(argv[0], "stage0_score.spv");
+        const auto reduceSumShaderPath = ResolveShaderPath(argv[0], "reduce_sum.spv");
+        const auto reduceAbsDeviationShaderPath =
+            ResolveShaderPath(argv[0], "reduce_abs_deviation.spv");
         const auto labPreprocessShaderPath = ResolveShaderPath(argv[0], "lab_preprocess.spv");
         const auto downsampleShaderPath = ResolveShaderPath(argv[0], "downsample_2x2.spv");
         const auto rgba8ToLinearShaderPath = ResolveShaderPath(argv[0], "rgba8_to_linear.spv");
         const auto vulkanYuvToRgbaShaderPath = ResolveShaderPath(argv[0], "vulkan_yuv_to_rgba8.spv");
         const auto stage0Spirv = ReadSpirv(stage0ShaderPath);
         const auto stage0ScoreSpirv = ReadSpirv(stage0ScoreShaderPath);
+        const auto reduceSumSpirv = ReadSpirv(reduceSumShaderPath);
+        const auto reduceAbsDeviationSpirv = ReadSpirv(reduceAbsDeviationShaderPath);
         const auto labPreprocessSpirv = ReadSpirv(labPreprocessShaderPath);
         const auto downsampleSpirv = ReadSpirv(downsampleShaderPath);
         const auto rgba8ToLinearSpirv = ReadSpirv(rgba8ToLinearShaderPath);
@@ -3636,6 +3779,8 @@ int main(int argc, char** argv) {
                 labPreprocessSpirv,
                 stage0Spirv,
                 stage0ScoreSpirv,
+                reduceSumSpirv,
+                reduceAbsDeviationSpirv,
                 downsampleSpirv,
                 rgba8ToLinearSpirv,
                 vulkanYuvToRgbaSpirv,

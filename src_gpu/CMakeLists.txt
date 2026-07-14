@@ -118,6 +118,8 @@ set(DSSIM_GPU_SHADER_NAMES
     lab_preprocess
     stage0_absdiff
     stage0_score
+    reduce_sum
+    reduce_abs_deviation
 )
 set(DSSIM_GPU_SHADER_OUTPUT_DIR
     "${CMAKE_BINARY_DIR}/src_gpu/$<CONFIG>/shaders"
