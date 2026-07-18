@@ -4,6 +4,7 @@ param(
     [string]$Linkage = 'Dynamic',
     [string]$Prefix = (Join-Path $PSScriptRoot "..\third_party\ffmpeg-8.1.2-shared"),
     [string]$MsysRoot = (Join-Path $env:USERPROFILE 'msys64'),
+    [string]$VcpkgRoot = '',
     [switch]$Clean
 )
 
@@ -17,6 +18,50 @@ $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $BuildRoot = Join-Path $RepositoryRoot 'third_party\ffmpeg-build'
 $SourceRoot = Join-Path $BuildRoot "ffmpeg-$Version"
 $Prefix = [System.IO.Path]::GetFullPath($Prefix)
+$ZlibVersion = '1.3.1'
+$ZlibSourceRoot = Join-Path $BuildRoot "zlib-$ZlibVersion"
+$ZlibBuildRoot = Join-Path $BuildRoot "zlib-$ZlibVersion-build"
+$ZlibPrefix = Join-Path $BuildRoot "zlib-$ZlibVersion-prefix"
+
+if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
+    $VcpkgCandidates = @(
+        $env:VCPKG_ROOT,
+        (Join-Path $env:USERPROFILE 'vcpkg'),
+        (Join-Path $env:USERPROFILE 'scoop\apps\vcpkg\current')
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $VcpkgRoot = $VcpkgCandidates |
+        Where-Object {
+            $installed = Join-Path $_ 'installed\x64-windows'
+            $pkgconf = @(
+                (Join-Path $installed 'bin\pkgconf.exe'),
+                (Join-Path $installed 'bin\pkg-config.exe'),
+                (Join-Path $installed 'tools\pkgconf\pkgconf.exe'),
+                (Join-Path $installed 'tools\pkgconf\pkg-config.exe')
+            ) | Where-Object { Test-Path -LiteralPath $_ }
+            (Test-Path -LiteralPath (Join-Path $installed 'lib\dav1d.lib')) -and
+                (Test-Path -LiteralPath (Join-Path $installed 'lib\jxl.lib')) -and
+                (@($pkgconf).Count -gt 0)
+        } |
+        Select-Object -First 1
+}
+if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
+    throw 'A vcpkg installation with the x64-windows triplet is required for libdav1d and libjxl. Pass -VcpkgRoot <path> or set VCPKG_ROOT.'
+}
+$VcpkgRoot = [System.IO.Path]::GetFullPath($VcpkgRoot)
+$VcpkgInstalled = Join-Path $VcpkgRoot 'installed\x64-windows'
+$VcpkgPkgConfig = Join-Path $VcpkgInstalled 'lib\pkgconfig'
+$VcpkgInclude = Join-Path $VcpkgInstalled 'include'
+$VcpkgLib = Join-Path $VcpkgInstalled 'lib'
+$VcpkgPkgConfCandidates = @(
+    (Join-Path $VcpkgInstalled 'bin\pkgconf.exe'),
+    (Join-Path $VcpkgInstalled 'bin\pkg-config.exe'),
+    (Join-Path $VcpkgInstalled 'tools\pkgconf\pkgconf.exe'),
+    (Join-Path $VcpkgInstalled 'tools\pkgconf\pkg-config.exe')
+)
+$VcpkgPkgConf = $VcpkgPkgConfCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($null -eq $VcpkgPkgConf) {
+    throw 'pkgconf is required to detect vcpkg libdav1d/libjxl. Install pkgconf:x64-windows first.'
+}
 
 function Get-RequiredCommand([string]$Name, [string]$Hint) {
     $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
@@ -60,7 +105,9 @@ if ($null -eq $BashPath) {
     throw "MSYS2 bash.exe was not found. Install MSYS2 or pass -MsysRoot <path-to-msys64>."
 }
 Get-RequiredCommand 'tar.exe' 'Install bsdtar or use the tar.exe bundled with Windows.' | Out-Null
-$MsysPrelude = 'export PATH=/usr/bin:/bin:$PATH; '
+$VcpkgPkgConfBashPath = ConvertTo-BashPath $VcpkgPkgConf
+$VcpkgPkgConfigWindowsPath = $VcpkgPkgConfig -replace '\\', '/'
+$MsysPrelude = "export PATH=/usr/bin:/bin:`$PATH; export PKG_CONFIG='$VcpkgPkgConfBashPath'; export PKG_CONFIG_PATH='$VcpkgPkgConfigWindowsPath'; "
 & $BashPath --noprofile --norc -lc "${MsysPrelude}command -v make >/dev/null"
 if ($LASTEXITCODE -ne 0) {
     throw "GNU make was not found in MSYS2. Install it with: pacman -S --needed make"
@@ -83,8 +130,57 @@ if (-not (Test-Path -LiteralPath $SourceRoot)) {
     }
 }
 
+# FFmpeg's native PNG decoder requires zlib. Keep it as an FFmpeg build
+# dependency, but do not expose or link zlib/libpng from the application.
+$ZlibArchive = Join-Path $BuildRoot "zlib-$ZlibVersion.zip"
+if (-not (Test-Path -LiteralPath $ZlibSourceRoot)) {
+    if (-not (Test-Path -LiteralPath $ZlibArchive)) {
+        Write-Host "Downloading zlib $ZlibVersion from github.com"
+        Invoke-WebRequest -Uri "https://github.com/madler/zlib/archive/refs/tags/v$ZlibVersion.zip" -OutFile $ZlibArchive
+    }
+    Expand-Archive -LiteralPath $ZlibArchive -DestinationPath $BuildRoot -Force
+}
+
+$ZlibLibrary = Join-Path $ZlibPrefix 'lib\zlibstatic.lib'
+if (-not (Test-Path -LiteralPath $ZlibLibrary)) {
+    Write-Host "Building zlib $ZlibVersion for FFmpeg"
+    & cmake -S $ZlibSourceRoot -B $ZlibBuildRoot `
+        -DBUILD_SHARED_LIBS=OFF -DZLIB_BUILD_SHARED=OFF -DZLIB_BUILD_TESTING=OFF `
+        "-DCMAKE_INSTALL_PREFIX=$ZlibPrefix" `
+        "-DINSTALL_LIB_DIR=$ZlibPrefix\lib" "-DINSTALL_BIN_DIR=$ZlibPrefix\bin" `
+        "-DINSTALL_INC_DIR=$ZlibPrefix\include" "-DINSTALL_MAN_DIR=$ZlibPrefix\share\man" `
+        "-DINSTALL_PKGCONFIG_DIR=$ZlibPrefix\share\pkgconfig"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'zlib configure failed.'
+    }
+    & cmake --build $ZlibBuildRoot --config Release --target install
+    if ($LASTEXITCODE -ne 0) {
+        throw 'zlib build failed.'
+    }
+}
+
+# FFmpeg's generated config.h defines HAVE_UNISTD_H while building on MSVC.
+# zlib's zconf.h uses #ifdef for that macro, which would incorrectly include
+# the POSIX-only unistd.h on Windows. Keep the generated zlib header usable by
+# both the standalone zlib build and FFmpeg's MSVC compilation.
+$ZconfPath = Join-Path $ZlibPrefix 'include\zconf.h'
+if (Test-Path -LiteralPath $ZconfPath) {
+    $zconfText = Get-Content -LiteralPath $ZconfPath -Raw
+    $patchedZconfText = [regex]::Replace(
+        $zconfText,
+        '(?m)^#ifdef HAVE_UNISTD_H.*$',
+        '#if defined(HAVE_UNISTD_H) && !defined(_WIN32)')
+    if ($patchedZconfText -ne $zconfText) {
+        Set-Content -LiteralPath $ZconfPath -Value $patchedZconfText -NoNewline -Encoding ascii
+    }
+}
+
 $SourceBashPath = ConvertTo-BashPath $SourceRoot
 $PrefixBashPath = ConvertTo-BashPath $Prefix
+$ZlibIncludeBashPath = ConvertTo-BashPath (Join-Path $ZlibPrefix 'include')
+$ZlibLibBashPath = ConvertTo-BashPath (Join-Path $ZlibPrefix 'lib')
+$VcpkgIncludeBashPath = ConvertTo-BashPath $VcpkgInclude
+$VcpkgLibBashPath = ConvertTo-BashPath $VcpkgLib
 $VulkanIncludeBashPath = ConvertTo-BashPath (Join-Path $env:VULKAN_SDK 'Include')
 $Parallelism = [Math]::Max(1, [Environment]::ProcessorCount)
 $LinkageArguments = if ($Linkage -eq 'Dynamic') {
@@ -94,20 +190,23 @@ $LinkageArguments = if ($Linkage -eq 'Dynamic') {
 }
 
 # Keep only the containers, parsers, codecs, and Vulkan Video hwaccels needed
-# by dssim-WebGPU. The application consumes AV_PIX_FMT_VULKAN frames directly;
-# there is deliberately no swscale/libavfilter path in this development build.
+# by dssim-WebGPU. Still images use the CPU-side libswscale conversion to RGBA8;
+# video inputs consume AV_PIX_FMT_VULKAN frames directly.
 $ConfigureArguments = @(
     '--toolchain=msvc', '--arch=x86_64',
     "--prefix=$PrefixBashPath"
 ) + $LinkageArguments + @(
     '--disable-programs', '--disable-doc', '--disable-debug',
     '--disable-autodetect', '--disable-network', '--disable-avdevice', '--disable-avfilter',
-    '--disable-swresample', '--disable-swscale', '--disable-encoders', '--disable-muxers',
+    '--disable-swresample', '--disable-encoders', '--disable-muxers',
     '--disable-filters', '--disable-bsfs', '--disable-protocols', '--disable-indevs', '--disable-outdevs',
     '--disable-decoders', '--disable-demuxers', '--disable-parsers', '--disable-hwaccels', '--disable-asm',
-    '--enable-avutil', '--enable-avcodec', '--enable-avformat',
-    '--enable-protocol=file', '--enable-demuxer=mov,matroska',
-    '--enable-parser=h264,hevc,av1,vp9', '--enable-decoder=h264,hevc,av1,vp9',
+    '--enable-avutil', '--enable-avcodec', '--enable-avformat', '--enable-swscale', '--enable-zlib',
+    "--pkg-config=$VcpkgPkgConfBashPath",
+    '--enable-protocol=file', '--enable-demuxer=image2,mov,matroska',
+    '--enable-parser=h264,hevc,av1,vp9,jpegxl',
+    '--enable-decoder=h264,hevc,av1,vp9,libdav1d,png,mjpeg,libjxl,jpeg2000,webp',
+    '--enable-libdav1d', '--enable-libjxl',
     '--enable-vulkan',
     '--enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan,vp9_vulkan',
     # Rust's MSVC target uses the dynamic CRT. Match it in FFmpeg so the
@@ -116,7 +215,12 @@ $ConfigureArguments = @(
     # `-MD` is accepted by cl.exe and, unlike `/MD`, is not rewritten as an
     # MSYS2 path while it passes through bash.exe.
     '--extra-cflags=-MD',
-    "--extra-cflags=-I$VulkanIncludeBashPath"
+    "--extra-cflags=-I$VulkanIncludeBashPath",
+    "--extra-cflags=-I$ZlibIncludeBashPath",
+    "--extra-cflags=-I$VcpkgIncludeBashPath",
+    "--extra-ldflags=-LIBPATH:$ZlibLibBashPath",
+    "--extra-ldflags=-LIBPATH:$VcpkgLibBashPath",
+    '--extra-libs=zlibstatic.lib'
 )
 
 $ConfigureLine = './configure ' + ($ConfigureArguments -join ' ')
@@ -140,14 +244,23 @@ if ($LASTEXITCODE -ne 0) {
 
 if ($Linkage -eq 'Dynamic') {
     # FFmpeg's MSVC shared build installs DLLs and their import libraries in
-    # bin/. ffmpeg-sys-next discovers prebuilt libraries exclusively under
-    # FFMPEG_DIR/lib, so mirror only the four import libraries there.
-    foreach ($library in @('avcodec.lib', 'avformat.lib', 'avutil.lib')) {
+    # bin/. CMake discovers the import libraries under the prefix's lib/.
+    foreach ($library in @('avcodec.lib', 'avformat.lib', 'avutil.lib', 'swscale.lib')) {
         $source = Join-Path $Prefix "bin\$library"
         if (-not (Test-Path -LiteralPath $source)) {
             throw "Shared FFmpeg import library was not installed: $source"
         }
         Copy-Item -LiteralPath $source -Destination (Join-Path $Prefix "lib\$library") -Force
+    }
+    $ZlibDll = Join-Path $ZlibPrefix 'bin\zlib.dll'
+    if (Test-Path -LiteralPath $ZlibDll) {
+        Copy-Item -LiteralPath $ZlibDll -Destination (Join-Path $Prefix 'bin\zlib.dll') -Force
+    }
+    $VcpkgBin = Join-Path $VcpkgInstalled 'bin'
+    if (Test-Path -LiteralPath $VcpkgBin) {
+        Get-ChildItem -LiteralPath $VcpkgBin -Filter '*.dll' -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Prefix 'bin\' $_.Name) -Force
+        }
     }
 }
 

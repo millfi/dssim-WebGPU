@@ -11,4 +11,4 @@ struct DecodedImage {
     std::vector<std::uint8_t> pixels;
 };
 
-DecodedImage LoadPngRgba8(const std::filesystem::path& path);
+DecodedImage LoadImageRgba8(const std::filesystem::path& path);

@@ -12,8 +12,11 @@ find_library(DSSIM_FFMPEG_AVFORMAT_LIBRARY NAMES avformat avformat-62
     PATHS "${DSSIM_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
 find_library(DSSIM_FFMPEG_AVUTIL_LIBRARY NAMES avutil avutil-60
     PATHS "${DSSIM_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+find_library(DSSIM_FFMPEG_SWSCALE_LIBRARY NAMES swscale swscale-9
+    PATHS "${DSSIM_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
 if(NOT DSSIM_FFMPEG_INCLUDE_DIR OR NOT DSSIM_FFMPEG_AVCODEC_LIBRARY OR
-   NOT DSSIM_FFMPEG_AVFORMAT_LIBRARY OR NOT DSSIM_FFMPEG_AVUTIL_LIBRARY)
+   NOT DSSIM_FFMPEG_AVFORMAT_LIBRARY OR NOT DSSIM_FFMPEG_AVUTIL_LIBRARY OR
+   NOT DSSIM_FFMPEG_SWSCALE_LIBRARY)
     message(FATAL_ERROR
         "Vulkan Video FFmpeg development files were not found under ${DSSIM_FFMPEG_ROOT}. "
         "Run tools/build_ffmpeg_minimal.ps1 -Linkage Dynamic first.")
@@ -38,45 +41,10 @@ if(NOT DSSIM_HAS_SHADER_OBJECT_HEADERS)
     )
 endif()
 
-include(FetchContent)
-
-set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(dssim_zlib
-    URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip
-)
-FetchContent_MakeAvailable(dssim_zlib)
-if(TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
-    add_library(ZLIB::ZLIB ALIAS zlibstatic)
-endif()
-
-set(PNG_BUILD_ZLIB ON CACHE BOOL "" FORCE)
-set(PNG_SHARED OFF CACHE BOOL "" FORCE)
-set(PNG_STATIC ON CACHE BOOL "" FORCE)
-set(PNG_TESTS OFF CACHE BOOL "" FORCE)
-set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
-set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
-set(PNG_HARDWARE_OPTIMIZATIONS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(dssim_libpng
-    URL https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.44.zip
-)
-FetchContent_MakeAvailable(dssim_libpng)
-
-if(TARGET PNG::PNG)
-    set(DSSIM_PNG_TARGET PNG::PNG)
-elseif(TARGET png_static)
-    set(DSSIM_PNG_TARGET png_static)
-elseif(TARGET png)
-    set(DSSIM_PNG_TARGET png)
-else()
-    message(FATAL_ERROR "libpng target not found after FetchContent")
-endif()
-
 add_executable(dssim_webgpu
     cli_options.cpp
     dssim-WebGPU.cpp
-    png_loader.cpp
+    image_loader.cpp
     video_decoder.cpp
 )
 set_target_properties(dssim_webgpu PROPERTIES
@@ -91,10 +59,10 @@ target_include_directories(dssim_webgpu PRIVATE
 )
 target_link_libraries(dssim_webgpu PRIVATE
     Vulkan::Vulkan
-    "${DSSIM_PNG_TARGET}"
     "${DSSIM_FFMPEG_AVCODEC_LIBRARY}"
     "${DSSIM_FFMPEG_AVFORMAT_LIBRARY}"
     "${DSSIM_FFMPEG_AVUTIL_LIBRARY}"
+    "${DSSIM_FFMPEG_SWSCALE_LIBRARY}"
 )
 
 if(WIN32)

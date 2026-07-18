@@ -28,7 +28,7 @@
 #include <vulkan/vulkan.h>
 
 #include "cli_options.h"
-#include "png_loader.h"
+#include "image_loader.h"
 #include "video_decoder.h"
 using namespace std::chrono;
 namespace {
@@ -3650,10 +3650,10 @@ void RunComparison(
     if (options.csvEnabled) {
         throw std::runtime_error("--csv is only supported for video comparisons");
     }
-    const DecodedImage image1 = LoadPngRgba8(request.image1);
-    const DecodedImage image2 = LoadPngRgba8(request.image2);
+    const DecodedImage image1 = LoadImageRgba8(request.image1);
+    const DecodedImage image2 = LoadImageRgba8(request.image2);
     if (image1.pixels.empty() || image2.pixels.empty()) {
-        throw std::runtime_error("decoded png pixels are empty");
+        throw std::runtime_error("decoded image pixels are empty");
     }
     if (image1.width != image2.width || image1.height != image2.height) {
         throw std::runtime_error(
