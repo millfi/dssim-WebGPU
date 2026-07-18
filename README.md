@@ -1,4 +1,4 @@
-# dssim-WebGPU
+# dssim-Vulkan
 
 An optimized C++20/Vulkan implementation of the DSSIM image and video
 comparison algorithm. The executable and CMake target retain their existing
@@ -27,8 +27,7 @@ The standard Vulkan SDK installation sets `VULKAN_SDK`, which CMake can use to
 find these components. There is no automatic SDK download.
 
 Inputs may be same-size PNG, JPEG, JPEG XL, JPEG 2000, WebP, HEIC, or AVIF
-images, or a pair of videos. JPEG XR is not supported because FFmpeg has no
-integrated JPEG XR decoder wrapper. Video containers are recognized by the
+images, or a pair of videos. Video containers are recognized by the
 `.mp4`, `.m4v`, `.mov`, `.mkv`, and `.webm` extensions.
 Frames are decoded through FFmpeg's Vulkan Video H.264/HEVC/VP9/AV1 hwaccels as
 `AV_PIX_FMT_VULKAN`; the decoded Vulkan images are converted from NV12 or P010
@@ -284,10 +283,6 @@ The current priority is reducing end-to-end latency while preserving scores.
 - Floating-point precision and algebraic transformations may change only when
   the regression check remains within tolerance.
 - Blur weights and SSIM constants must not change.
-- Keep all shader dispatches two-dimensional with GLSL
-  `layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;` and
-  dispatch dimensions
-  `(ceil(width / 16), ceil(height / 16), 1)`.
 
 ## Vulkan SDK and shaders
 
