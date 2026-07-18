@@ -26,8 +26,10 @@ CMake locates the SDK with `find_package(Vulkan REQUIRED COMPONENTS glslc)`.
 The standard Vulkan SDK installation sets `VULKAN_SDK`, which CMake can use to
 find these components. There is no automatic SDK download.
 
-Inputs may be same-size PNG images or a pair of videos. Video containers are
-recognized by the `.mp4`, `.m4v`, `.mov`, `.mkv`, and `.webm` extensions.
+Inputs may be same-size PNG, JPEG, JPEG XL, JPEG 2000, WebP, HEIC, or AVIF
+images, or a pair of videos. JPEG XR is not supported because FFmpeg has no
+integrated JPEG XR decoder wrapper. Video containers are recognized by the
+`.mp4`, `.m4v`, `.mov`, `.mkv`, and `.webm` extensions.
 Frames are decoded through FFmpeg's Vulkan Video H.264/HEVC/VP9/AV1 hwaccels as
 `AV_PIX_FMT_VULKAN`; the decoded Vulkan images are converted from NV12 or P010
 to RGBA8 on the GPU and are not read back to CPU memory.
@@ -35,8 +37,11 @@ to RGBA8 on the GPU and are not read back to CPU memory.
 ## Build
 
 Run all repository commands from PowerShell. The target requires the minimal
-FFmpeg development files even when it will only compare PNG images. Build them
-once if `third_party/ffmpeg-8.1.2-shared` is not already present:
+FFmpeg development files even for image-only comparisons. The FFmpeg build
+also uses the vcpkg `x64-windows` packages `dav1d`, `libjxl`, and `pkgconf` for
+AVIF and JPEG XL support; set `VCPKG_ROOT` or pass `-VcpkgRoot` if vcpkg is not
+in one of the default locations. Build FFmpeg once if
+`third_party/ffmpeg-8.1.2-shared` is not already present:
 
 ```powershell
 & .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic
@@ -158,8 +163,9 @@ so different resolutions do not require different shader objects.
 
 ## Mechanical score regression check
 
-The regression checker compares the Vulkan implementation against the original
-`dssim.exe` resolved from `PATH`:
+The regression checker compares the Vulkan implementation against the local
+reference at `src_reference/target/release/dssim.exe`. If it does not exist,
+the checker builds it with Cargo using the `video` feature:
 
 ```powershell
 & .\tools\check_regression.ps1
@@ -168,16 +174,19 @@ The regression checker compares the Vulkan implementation against the original
 To inspect the selected reference executable:
 
 ```powershell
-(Get-Command dssim.exe -CommandType Application).Source
+Get-Item .\src_reference\target\release\dssim.exe
 ```
 
 The checker:
 
 - reads every pair from `tests/test_pairs.txt`
 - runs all Vulkan comparisons in one `--stdin-pairs` session
-- runs the original `dssim.exe` for each pair
-- requires `0.00000000` for identical-image comparisons
+- runs the local reference `src_reference/target/release/dssim.exe` for each pair
 - requires relative error below 1% for other comparisons
+- additionally compares `tests/gradation.png` with itself and requires
+  `0.00000000`
+- additionally compares `benchmark/3s.webm` with itself and requires a finite
+  `0.00000000` average DSSIM and at least one decoded frame
 - prints a result table and exits nonzero if any comparison fails
 
 Useful overrides:
@@ -186,7 +195,9 @@ Useful overrides:
 & .\tools\check_regression.ps1 `
     -PairList .\tests\test_pairs.txt `
     -GpuExecutable .\build\src_gpu\Release\dssim-WebGPU.exe `
-    -RelativeTolerance 0.01
+    -RelativeTolerance 0.01 `
+    -IdentityImagePath .\tests\gradation.png `
+    -IdentityVideoPath .\benchmark\3s.webm
 ```
 
 Run this check after every score-affecting or performance change and before
@@ -300,5 +311,5 @@ compiled at application startup:
 - `stage0_score.comp`
 
 The reference source under `src_reference/` remains available for studying
-algorithm details. Automated regression validation intentionally uses the
-`dssim.exe` selected from `PATH`.
+algorithm details. Automated regression validation uses the locally built
+`src_reference/target/release/dssim.exe`.

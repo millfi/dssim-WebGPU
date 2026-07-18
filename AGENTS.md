@@ -19,7 +19,8 @@
    - `& cmake --build build --config Release --target dssim_webgpu`
 3. Run the fixed multi-pair benchmark command:
    - `Get-Content .\tests\test_pairs.txt | & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling`
-4. Mechanically compare scores with the original `dssim.exe` found on `PATH`:
+4. Mechanically compare scores with the local reference at
+   `src_reference\target\release\dssim.exe`:
    - `& .\tools\check_regression.ps1`
 
 The fixed regression list currently covers PNG comparisons. Changes to video
@@ -70,7 +71,7 @@ reference executable or a reproducibly generated same-input result.
   (including path equality, encoded/decoded byte comparison, or hashes), and do
   not override the resulting score based on such a check. An identical-input
   score of zero must emerge from the normal DSSIM computation path.
-- All other test pairs in `tests/test_pairs.txt`: **relative error < 1%** against the `dssim.exe` resolved from `PATH`.
+- All other test pairs in `tests/test_pairs.txt`: **relative error < 1%** against the local `src_reference\target\release\dssim.exe`.
 - After every optimization, re-run all pairs and confirm the tolerance holds before committing.
 - Do not replace the mechanical `dssim.exe` comparison with hand-edited reference scores.
 
@@ -112,14 +113,14 @@ reference executable or a reproducibly generated same-input result.
   2. Run the fixed benchmark command.
   3. Run `& .\tools\check_regression.ps1`.
   4. Require every pair to pass before committing.
-- `tools/check_regression.ps1` resolves `dssim.exe` from `PATH`, runs both implementations, and exits nonzero on a tolerance violation.
+- `tools/check_regression.ps1` builds `src_reference\target\release\dssim.exe` when absent, runs both implementations, and exits nonzero on a tolerance violation.
 - Do not update reference scores by hand.
 - Use `--out <json>` for per-scale inspection and `--debug-dump-dir` for buffer-level investigation.
 
 ## Reference implementation
 
-- Use the original `dssim.exe` resolved from `PATH` for mechanical regression validation.
-- Confirm the resolved executable when needed with `(Get-Command dssim.exe -CommandType Application).Source`.
+- Use the local `src_reference\target\release\dssim.exe` for mechanical regression validation.
+- Confirm the selected executable when needed with `Get-Item .\src_reference\target\release\dssim.exe`.
 - The reference source under `src_reference/` can be read to understand algorithmic details when needed.
 
 ## Profiling output
