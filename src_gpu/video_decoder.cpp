@@ -6,6 +6,8 @@
 #include <cstring>
 #include <stdexcept>
 
+#include <libavutil/hwcontext.h>
+
 namespace {
 
 enum AVPixelFormat SelectVulkanFormat(
@@ -25,6 +27,27 @@ void CheckAv(const char* operation, int errorCode) {
     if (errorCode < 0) {
         throw std::runtime_error(std::string(operation) + " failed: " + AvErrorString(errorCode));
     }
+}
+
+const AVCodec* FindVulkanDecoder(AVCodecID codecId) {
+    void* iterator = nullptr;
+    const AVCodec* candidate = nullptr;
+    while ((candidate = av_codec_iterate(&iterator)) != nullptr) {
+        if (!av_codec_is_decoder(candidate) || candidate->id != codecId) {
+            continue;
+        }
+        for (int configIndex = 0;; ++configIndex) {
+            const AVCodecHWConfig* config = avcodec_get_hw_config(candidate, configIndex);
+            if (config == nullptr) {
+                break;
+            }
+            if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 &&
+                config->device_type == AV_HWDEVICE_TYPE_VULKAN) {
+                return candidate;
+            }
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -156,7 +179,7 @@ void VulkanVideoReader::Open(
     streamTimeBase_ = format_->streams[streamIndex_]->time_base;
 
     const AVCodecParameters* parameters = format_->streams[streamIndex_]->codecpar;
-    const AVCodec* decoder = avcodec_find_decoder(parameters->codec_id);
+    const AVCodec* decoder = FindVulkanDecoder(parameters->codec_id);
     if (decoder == nullptr) {
         throw std::runtime_error("FFmpeg Vulkan Video decoder is not enabled for " + path);
     }
