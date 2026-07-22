@@ -162,7 +162,7 @@ so different resolutions do not require different shader objects.
 
 ## Mechanical score regression check
 
-The regression checker compares the Vulkan implementation against the local
+The regression checker`check_regression.ps1` compares the Vulkan implementation against the local
 reference at `src_reference/target/release/dssim.exe`. If it does not exist,
 the checker builds it with Cargo using the `video` feature:
 
