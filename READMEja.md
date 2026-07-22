@@ -160,9 +160,9 @@ shader objectをプロセス内で一度だけ作成し、すべてのペアで�
 `--stdin-pairs` は `--out`、`--csv`、`--pipeline-depth`、
 `--debug-dump-dir` と同時には使えません。
 
-## スコア回帰の自動確認
+## 自動テスト
 
-回帰チェッカーは、Vulkan版のスコアをPATH上から解決したオリジナルの
+テストスクリプト`check_regression.ps1`は、Vulkan版のスコアをPATH上から解決したオリジナルの
 `dssim.exe` と比較します。
 
 ```powershell
@@ -271,10 +271,6 @@ pipeline layoutの処理は、対応する既存bucketへ計上します。times
 - その他のペアは `dssim.exe` に対する相対誤差1%未満を維持する
 - 浮動小数点精度や代数変形は、回帰チェックの許容範囲内でのみ変更できる
 - blur weightおよびSSIM定数は変更しない
-- シェーダーはGLSL
-  `layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;`の
-  2次元ディスパッチを維持し、ディスパッチ数を
-  `(ceil(width / 16), ceil(height / 16), 1)`とする
 
 ## Vulkan SDKとシェーダー
 
