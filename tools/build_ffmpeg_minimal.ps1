@@ -22,33 +22,102 @@ $ZlibVersion = '1.3.1'
 $ZlibSourceRoot = Join-Path $BuildRoot "zlib-$ZlibVersion"
 $ZlibBuildRoot = Join-Path $BuildRoot "zlib-$ZlibVersion-build"
 $ZlibPrefix = Join-Path $BuildRoot "zlib-$ZlibVersion-prefix"
+$VcpkgTriplet = 'x64-windows'
+$RepositoryVcpkgRoot = Join-Path $RepositoryRoot 'third_party\vcpkg'
 
-if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
-    $VcpkgCandidates = @(
-        $env:VCPKG_ROOT,
-        (Join-Path $env:USERPROFILE 'vcpkg'),
-        (Join-Path $env:USERPROFILE 'scoop\apps\vcpkg\current')
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    $VcpkgRoot = $VcpkgCandidates |
-        Where-Object {
-            $installed = Join-Path $_ 'installed\x64-windows'
-            $pkgconf = @(
-                (Join-Path $installed 'bin\pkgconf.exe'),
-                (Join-Path $installed 'bin\pkg-config.exe'),
-                (Join-Path $installed 'tools\pkgconf\pkgconf.exe'),
-                (Join-Path $installed 'tools\pkgconf\pkg-config.exe')
-            ) | Where-Object { Test-Path -LiteralPath $_ }
-            (Test-Path -LiteralPath (Join-Path $installed 'lib\dav1d.lib')) -and
-                (Test-Path -LiteralPath (Join-Path $installed 'lib\jxl.lib')) -and
-                (@($pkgconf).Count -gt 0)
-        } |
-        Select-Object -First 1
+function Test-VcpkgRoot([string]$Root) {
+    return -not [string]::IsNullOrWhiteSpace($Root) -and
+        (Test-Path -LiteralPath (Join-Path $Root 'vcpkg.exe') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $Root 'ports') -PathType Container) -and
+        (Test-Path -LiteralPath (Join-Path $Root 'scripts\buildsystems\vcpkg.cmake') -PathType Leaf)
 }
-if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
-    throw 'A vcpkg installation with the x64-windows triplet is required for libdav1d and libjxl. Pass -VcpkgRoot <path> or set VCPKG_ROOT.'
+
+function Get-VcpkgRoot([string]$RequestedRoot, [string]$LocalRoot) {
+    # An explicit parameter is intentional. Otherwise favour the vcpkg on PATH,
+    # then VCPKG_ROOT, before using a repository-local checkout.
+    if (-not [string]::IsNullOrWhiteSpace($RequestedRoot)) {
+        if (-not (Test-VcpkgRoot $RequestedRoot)) {
+            throw "-VcpkgRoot does not contain vcpkg.exe: $RequestedRoot"
+        }
+        return [System.IO.Path]::GetFullPath($RequestedRoot)
+    }
+
+    $PathVcpkg = Get-Command 'vcpkg.exe' -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -eq $PathVcpkg) {
+        $PathVcpkg = Get-Command 'vcpkg' -CommandType Application -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $PathVcpkg) {
+        $PathRoot = Split-Path -Parent $PathVcpkg.Source
+        if (Test-VcpkgRoot $PathRoot) {
+            return [System.IO.Path]::GetFullPath($PathRoot)
+        }
+    }
+
+    if (Test-VcpkgRoot $env:VCPKG_ROOT) {
+        return [System.IO.Path]::GetFullPath($env:VCPKG_ROOT)
+    }
+
+    if (-not (Test-VcpkgRoot $LocalRoot)) {
+        if (-not (Test-Path -LiteralPath $LocalRoot)) {
+            $git = Get-Command 'git.exe' -CommandType Application -ErrorAction SilentlyContinue
+            if ($null -eq $git) {
+                $git = Get-Command 'git' -CommandType Application -ErrorAction SilentlyContinue
+            }
+            if ($null -eq $git) {
+                throw 'vcpkg was not found and git.exe is required to create the repository-local vcpkg checkout.'
+            }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LocalRoot) | Out-Null
+            Write-Host "Cloning vcpkg into $LocalRoot"
+            & $git.Source clone --depth 1 https://github.com/microsoft/vcpkg.git $LocalRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Unable to clone the repository-local vcpkg checkout.'
+            }
+        }
+
+        $Bootstrap = Join-Path $LocalRoot 'bootstrap-vcpkg.bat'
+        if (-not (Test-Path -LiteralPath $Bootstrap)) {
+            throw "vcpkg was not found and the repository-local checkout is incomplete: $LocalRoot"
+        }
+        Write-Host "Bootstrapping repository-local vcpkg at $LocalRoot"
+        & $Bootstrap -disableMetrics | Out-Host
+        if ($LASTEXITCODE -ne 0 -or -not (Test-VcpkgRoot $LocalRoot)) {
+            throw 'Unable to bootstrap the repository-local vcpkg checkout.'
+        }
+    }
+
+    return [System.IO.Path]::GetFullPath($LocalRoot)
 }
-$VcpkgRoot = [System.IO.Path]::GetFullPath($VcpkgRoot)
-$VcpkgInstalled = Join-Path $VcpkgRoot 'installed\x64-windows'
+
+function Test-FfmpegVcpkgDependencies([string]$Root, [string]$Triplet) {
+    $installed = Join-Path $Root "installed\\$Triplet"
+    $pkgconf = @(
+        (Join-Path $installed 'bin\pkgconf.exe'),
+        (Join-Path $installed 'bin\pkg-config.exe'),
+        (Join-Path $installed 'tools\pkgconf\pkgconf.exe'),
+        (Join-Path $installed 'tools\pkgconf\pkg-config.exe')
+    ) | Where-Object { Test-Path -LiteralPath $_ }
+    return (Test-Path -LiteralPath (Join-Path $installed 'lib\dav1d.lib')) -and
+        (Test-Path -LiteralPath (Join-Path $installed 'lib\jxl.lib')) -and
+        (@($pkgconf).Count -gt 0)
+}
+
+$VcpkgRoot = Get-VcpkgRoot $VcpkgRoot $RepositoryVcpkgRoot
+$VcpkgExecutable = Join-Path $VcpkgRoot 'vcpkg.exe'
+if (-not (Test-FfmpegVcpkgDependencies $VcpkgRoot $VcpkgTriplet)) {
+    Write-Host "Installing FFmpeg vcpkg dependencies for $VcpkgTriplet"
+    Push-Location -LiteralPath $VcpkgRoot
+    try {
+        & $VcpkgExecutable install "dav1d:$VcpkgTriplet" "libjxl:$VcpkgTriplet" "pkgconf:$VcpkgTriplet"
+        $VcpkgExitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($VcpkgExitCode -ne 0 -or -not (Test-FfmpegVcpkgDependencies $VcpkgRoot $VcpkgTriplet)) {
+        throw "Unable to install the required vcpkg dependencies for $VcpkgTriplet."
+    }
+}
+
+$VcpkgInstalled = Join-Path $VcpkgRoot "installed\\$VcpkgTriplet"
 $VcpkgPkgConfig = Join-Path $VcpkgInstalled 'lib\pkgconfig'
 $VcpkgInclude = Join-Path $VcpkgInstalled 'include'
 $VcpkgLib = Join-Path $VcpkgInstalled 'lib'
@@ -108,9 +177,11 @@ Get-RequiredCommand 'tar.exe' 'Install bsdtar or use the tar.exe bundled with Wi
 $VcpkgPkgConfBashPath = ConvertTo-BashPath $VcpkgPkgConf
 $VcpkgPkgConfigWindowsPath = $VcpkgPkgConfig -replace '\\', '/'
 $MsysPrelude = "export PATH=/usr/bin:/bin:`$PATH; export PKG_CONFIG='$VcpkgPkgConfBashPath'; export PKG_CONFIG_PATH='$VcpkgPkgConfigWindowsPath'; "
-& $BashPath --noprofile --norc -lc "${MsysPrelude}command -v make >/dev/null"
-if ($LASTEXITCODE -ne 0) {
-    throw "GNU make was not found in MSYS2. Install it with: pacman -S --needed make"
+foreach ($MsysCommand in @('make', 'cmp')) {
+    & $BashPath --noprofile --norc -lc "${MsysPrelude}command -v $MsysCommand >/dev/null"
+    if ($LASTEXITCODE -ne 0) {
+        throw "'$MsysCommand' was not found in MSYS2. Install the FFmpeg build tools with: pacman -S --needed make diffutils"
+    }
 }
 
 if ($Clean -and (Test-Path -LiteralPath $BuildRoot)) {
@@ -122,11 +193,30 @@ $Archive = Join-Path $BuildRoot "ffmpeg-$Version.tar.xz"
 if (-not (Test-Path -LiteralPath $SourceRoot)) {
     if (-not (Test-Path -LiteralPath $Archive)) {
         Write-Host "Downloading FFmpeg $Version from ffmpeg.org"
-        Invoke-WebRequest -Uri $SourceUrl -OutFile $Archive
+        try {
+            Invoke-WebRequest -Uri $SourceUrl -OutFile $Archive
+        } catch {
+            Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
+            $git = Get-Command 'git.exe' -CommandType Application -ErrorAction SilentlyContinue
+            if ($null -eq $git) {
+                $git = Get-Command 'git' -CommandType Application -ErrorAction SilentlyContinue
+            }
+            if ($null -eq $git) {
+                throw "Unable to download FFmpeg from ffmpeg.org and git.exe is unavailable for the fallback: $_"
+            }
+            Write-Warning 'ffmpeg.org was unavailable; cloning the matching tag from the official FFmpeg GitHub mirror.'
+            & $git.Source clone --depth 1 --branch "n$Version" `
+                https://github.com/FFmpeg/FFmpeg.git $SourceRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Unable to clone the FFmpeg source fallback.'
+            }
+        }
     }
-    & tar.exe -xf $Archive -C $BuildRoot
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to unpack $Archive"
+    if (-not (Test-Path -LiteralPath $SourceRoot)) {
+        & tar.exe -xf $Archive -C $BuildRoot
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to unpack $Archive"
+        }
     }
 }
 
@@ -265,10 +355,6 @@ if ($Linkage -eq 'Dynamic') {
 }
 
 Write-Host "Minimal $Linkage FFmpeg installed at $Prefix"
-Write-Host 'Build the reference CLI with:'
-Write-Host "  `$env:FFMPEG_DIR = '$Prefix'"
-Write-Host '  & cargo build --manifest-path .\src_reference\Cargo.toml --release --features video'
-if ($Linkage -eq 'Dynamic') {
-    Write-Host 'Run with the FFmpeg DLL directory on PATH:'
-    Write-Host "  `$env:PATH = '$Prefix\bin;' + `$env:PATH"
-}
+Write-Host 'Configure and build the Vulkan GPU executable with:'
+Write-Host '  & cmake -S . -B build'
+Write-Host '  & cmake --build build --config Release --target dssim_webgpu'
