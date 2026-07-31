@@ -103,11 +103,31 @@ function Test-FfmpegVcpkgDependencies([string]$Root, [string]$Triplet) {
 
 $VcpkgRoot = Get-VcpkgRoot $VcpkgRoot $RepositoryVcpkgRoot
 $VcpkgExecutable = Join-Path $VcpkgRoot 'vcpkg.exe'
+$VcpkgInstallArguments = @(
+    'install',
+    "dav1d:$VcpkgTriplet",
+    "libjxl:$VcpkgTriplet",
+    "pkgconf:$VcpkgTriplet"
+)
+$ResolvedRepositoryVcpkgRoot = [System.IO.Path]::GetFullPath($RepositoryVcpkgRoot).TrimEnd('\')
+$ResolvedVcpkgRoot = [System.IO.Path]::GetFullPath($VcpkgRoot).TrimEnd('\')
+if ($ResolvedVcpkgRoot.Equals(
+        $ResolvedRepositoryVcpkgRoot,
+        [System.StringComparison]::OrdinalIgnoreCase)) {
+    $VcpkgDownloads = Join-Path $VcpkgRoot 'downloads'
+    $VcpkgBinaryCache = Join-Path $VcpkgRoot 'binary-cache'
+    New-Item -ItemType Directory -Force -Path $VcpkgDownloads, $VcpkgBinaryCache | Out-Null
+    $VcpkgInstallArguments += @(
+        "--vcpkg-root=$VcpkgRoot",
+        "--downloads-root=$VcpkgDownloads",
+        "--binarysource=clear;files,$VcpkgBinaryCache,readwrite"
+    )
+}
 if (-not (Test-FfmpegVcpkgDependencies $VcpkgRoot $VcpkgTriplet)) {
     Write-Host "Installing FFmpeg vcpkg dependencies for $VcpkgTriplet"
     Push-Location -LiteralPath $VcpkgRoot
     try {
-        & $VcpkgExecutable install "dav1d:$VcpkgTriplet" "libjxl:$VcpkgTriplet" "pkgconf:$VcpkgTriplet"
+        & $VcpkgExecutable @VcpkgInstallArguments
         $VcpkgExitCode = $LASTEXITCODE
     } finally {
         Pop-Location

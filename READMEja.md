@@ -36,20 +36,26 @@ CPU readbackはありません。
 
 ## ビルド
 
-リポジトリ内のコマンドはすべてPowerShellから実行します。PNGだけを比較する
-場合も、ターゲットのビルドには最小構成FFmpegの開発ファイルが必要です。
-`third_party/ffmpeg-8.1.2-shared`がない場合は、最初に一度生成します。
+リポジトリ内のコマンドはすべてPowerShellから実行します。PNGだけを比較する場合も、
+ターゲットのビルドには最小構成FFmpeg Vulkan Videoの開発ファイルが必要です。
+Windows向けheader、import library、DLLは`third_party/ffmpeg-8.1.2-shared`に
+同梱されるため、clone直後でもnetwork接続なしでbuildできます。GPU targetは次の
+scriptでbuildします。
 
 ```powershell
-& .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic
+& .\tools\build_gpu.ps1
 ```
 
-その後は通常どおりconfigureとbuildを実行します。
+同等の手動コマンドは次のとおりです。
 
 ```powershell
 & cmake -S . -B build
 & cmake --build build --config Release --target dssim_webgpu
 ```
+
+同梱FFmpeg directoryがないか不完全な場合、`build_gpu.ps1`は
+`build_ffmpeg_minimal.ps1`で再生成します。この復旧経路では完全版vcpkgがあれば
+それを使用し、なければrepository内へvcpkgをdownloadするためnetwork接続が必要です。
 
 実行ファイルは次の場所に生成されます。
 
