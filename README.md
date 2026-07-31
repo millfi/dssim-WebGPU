@@ -35,28 +35,23 @@ to RGBA8 on the GPU and are not read back to CPU memory.
 
 ## Build
 
-Run all repository commands from PowerShell. The target requires the minimal
-FFmpeg Vulkan Video development files even for image-only comparisons. The
-Windows headers, import libraries, and DLLs are bundled under
-`third_party/ffmpeg-8.1.2-shared`, so a fresh clone can be built without network
-access. Build the GPU target with:
-
 ```powershell
 & .\tools\build_gpu.ps1
 ```
 
-The equivalent manual commands are:
+or
 
 ```powershell
 & cmake -S . -B build
 & cmake --build build --config Release --target dssim_webgpu
 ```
 
-If the bundled FFmpeg directory is missing or incomplete, `build_gpu.ps1`
-rebuilds it through `build_ffmpeg_minimal.ps1`. That recovery path uses an
-existing full vcpkg checkout when available and downloads a repository-local
-vcpkg checkout when it is unavailable, so the recovery path requires network
-access.
+`build_gpu.ps1` verifies the archive with a fixed SHA-256 before extracting it.
+If the archive is missing or modified, the script downloads the same archive
+from the current commit on the GitHub `origin` remote and verifies it before
+replacement. `build_ffmpeg_minimal.ps1` remains available to regenerate the
+archive contents; when it downloads a repository-local vcpkg, both downloads
+and the binary cache stay under `third_party/vcpkg` rather than AppData.
 
 The executable is written to:
 

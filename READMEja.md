@@ -34,28 +34,23 @@ SDKを自動取得する処理はありません。
 NV12またはP010のVulkan imageをGPU内でRGBA8へ変換します。デコードフレームの
 CPU readbackはありません。
 
-## ビルド
-
-リポジトリ内のコマンドはすべてPowerShellから実行します。PNGだけを比較する場合も、
-ターゲットのビルドには最小構成FFmpeg Vulkan Videoの開発ファイルが必要です。
-Windows向けheader、import library、DLLは`third_party/ffmpeg-8.1.2-shared`に
-同梱されるため、clone直後でもnetwork接続なしでbuildできます。GPU targetは次の
-scriptでbuildします。
-
+## build
 ```powershell
 & .\tools\build_gpu.ps1
 ```
 
-同等の手動コマンドは次のとおりです。
+or
 
 ```powershell
 & cmake -S . -B build
 & cmake --build build --config Release --target dssim_webgpu
 ```
 
-同梱FFmpeg directoryがないか不完全な場合、`build_gpu.ps1`は
-`build_ffmpeg_minimal.ps1`で再生成します。この復旧経路では完全版vcpkgがあれば
-それを使用し、なければrepository内へvcpkgをdownloadするためnetwork接続が必要です。
+`build_gpu.ps1`は展開前に固定SHA-256でarchiveを検証します。archiveがないか変更されて
+いる場合はGitHubの`origin`にある現在のcommitから同じarchiveをdownloadし、検証後に
+置換します。archive内容の再生成には`build_ffmpeg_minimal.ps1`を使用できます。
+repository内へdownloadしたvcpkgのdownload fileとbinary cacheはどちらも
+`third_party/vcpkg`配下へ保存され、user共通のAppData cacheは使用しません。
 
 実行ファイルは次の場所に生成されます。
 
