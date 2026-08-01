@@ -161,6 +161,22 @@ fn require_d3d11va2_configuration(codec: &ffmpeg::codec::codec::Codec) -> Result
     .into())
 }
 
+/// Select FFmpeg's native decoder explicitly. `decoder::find(codec_id)` may
+/// return an enabled external decoder such as libdav1d, which cannot expose
+/// the D3D11VA hwaccel configurations attached to FFmpeg's native decoder.
+fn find_d3d11va_decoder(id: ffmpeg::codec::Id) -> Result<ffmpeg::codec::codec::Codec> {
+    let name = match id {
+        ffmpeg::codec::Id::H264 => "h264",
+        ffmpeg::codec::Id::HEVC => "hevc",
+        ffmpeg::codec::Id::VP9 => "vp9",
+        ffmpeg::codec::Id::AV1 => "av1",
+        _ => return Err(format!("Unsupported video codec: {id:?}").into()),
+    };
+
+    ffmpeg::codec::decoder::find_by_name(name)
+        .ok_or_else(|| format!("The native FFmpeg decoder '{name}' is not enabled").into())
+}
+
 unsafe extern "C" fn select_d3d11_format(
     _context: *mut ffi::AVCodecContext,
     formats: *const ffi::AVPixelFormat,
@@ -198,8 +214,7 @@ impl VideoReader {
             .best(ffmpeg::media::Type::Video)
             .ok_or("No video stream was found")?;
         let stream_index = stream.index();
-        let codec = ffmpeg::codec::decoder::find(stream.parameters().id())
-            .ok_or("The video codec is not enabled in the minimal FFmpeg build")?;
+        let codec = find_d3d11va_decoder(stream.parameters().id())?;
         require_d3d11va2_configuration(&codec)?;
 
         let hardware_device = HardwareDevice::d3d11va()?;
