@@ -9,8 +9,5 @@
 .\tests\laptop.png	.\tests\laptop.d8.8.e7.jxl.png
 .\tests\laptop.png	.\tests\laptop.q24.jpegli.jpg.png
 .\tests\nv5_av1_vbr_7000_cutted.mp4	.\tests\nv5_av1_vbr_7000_x265lossless_cutted.mp4
-<<<<<<< HEAD
 .\tests\raw1k.mp4	.\tests\nv5_hevc_vbr_6000.mp4
 .\tests\raw1k.mp4	.\tests\nv5_av1_vbr_7000.mp4
-=======
->>>>>>> d7f8254 (commit 3ac92e3e43800aea354f9dcf5ff026b68f8c032aで追加したテスト動画をテストスクリプトに追加)
