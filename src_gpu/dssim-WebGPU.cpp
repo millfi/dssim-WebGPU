@@ -1623,8 +1623,13 @@ VkImageView CreateVideoPlaneView(
     VkImage image,
     VkFormat format,
     VkImageAspectFlags aspect) {
+    const VkImageViewUsageCreateInfo viewUsage = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+    };
     const VkImageViewCreateInfo viewInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = &viewUsage,
         .image = image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = format,
@@ -2430,11 +2435,16 @@ PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
         vulkan13Features.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         vulkan13Features.pNext = &shaderObjectFeatures;
+        VkPhysicalDeviceVulkan12Features vulkan12Features{};
+        vulkan12Features.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        vulkan12Features.pNext = &vulkan13Features;
         VkPhysicalDeviceFeatures2 features{};
         features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features.pNext = &vulkan13Features;
+        features.pNext = &vulkan12Features;
         vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
         if (shaderObjectFeatures.shaderObject != VK_TRUE ||
+            vulkan12Features.timelineSemaphore != VK_TRUE ||
             vulkan13Features.synchronization2 != VK_TRUE ||
             vulkan13Features.dynamicRendering != VK_TRUE) {
             continue;
@@ -2707,9 +2717,20 @@ std::unique_ptr<GpuSession> CreateGpuSession(
         selection.videoDecodeQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED &&
         session->videoDecodeCaps != 0;
 
+    const bool hasVideoMaintenance1 =
+        session->videoSupported &&
+        HasDeviceExtension(
+            session->physicalDevice,
+            VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME);
+    VkPhysicalDeviceVideoMaintenance1FeaturesKHR videoMaintenance1Features{};
+    videoMaintenance1Features.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_MAINTENANCE_1_FEATURES_KHR;
+    videoMaintenance1Features.videoMaintenance1 = VK_TRUE;
     VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{};
     shaderObjectFeatures.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT;
+    shaderObjectFeatures.pNext =
+        hasVideoMaintenance1 ? &videoMaintenance1Features : nullptr;
     shaderObjectFeatures.shaderObject = VK_TRUE;
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType =
@@ -2717,6 +2738,11 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     vulkan13Features.pNext = &shaderObjectFeatures;
     vulkan13Features.synchronization2 = VK_TRUE;
     vulkan13Features.dynamicRendering = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features vulkan12Features{};
+    vulkan12Features.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12Features.pNext = &vulkan13Features;
+    vulkan12Features.timelineSemaphore = VK_TRUE;
 
     const float queuePriority = 1.0f;
     const VkDeviceQueueCreateInfo computeQueueInfo = {
@@ -2768,16 +2794,14 @@ std::unique_ptr<GpuSession> CreateGpuSession(
         if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) != 0) {
             deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME);
         }
-        if (HasDeviceExtension(
-                session->physicalDevice,
-                VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME)) {
+        if (hasVideoMaintenance1) {
             deviceExtensions.push_back(VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME);
         }
         session->videoDeviceExtensions = deviceExtensions;
     }
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext = &vulkan13Features;
+    deviceInfo.pNext = &vulkan12Features;
     deviceInfo.queueCreateInfoCount = queueInfoCount;
     deviceInfo.pQueueCreateInfos = queueInfos.data();
     deviceInfo.enabledExtensionCount =

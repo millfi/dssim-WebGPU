@@ -240,6 +240,28 @@ if (-not (Test-Path -LiteralPath $SourceRoot)) {
     }
 }
 
+# FFmpeg commit b637624046a0 changed AV1 tile starts from superblock units to
+# the mode-info units required by the Vulkan Video specification. The AMD
+# proprietary Windows driver still interprets these values as superblock units,
+# corrupting every tile after the first. Keep the upstream behavior everywhere
+# else, and remove this compatibility patch once the AMD driver accepts MI units.
+$VulkanAv1Source = Join-Path $SourceRoot 'libavcodec\vulkan_av1.c'
+$VulkanAv1Original = '    uint16_t sb_shift = seq->use_128x128_superblock ? 5 : 4;'
+$VulkanAv1Patched = @'
+    const uint16_t sb_shift =
+        dec->shared_ctx->s.driver_props.driverID == VK_DRIVER_ID_AMD_PROPRIETARY ?
+        0 : (seq->use_128x128_superblock ? 5 : 4);
+'@
+$VulkanAv1PatchMarker =
+    'dec->shared_ctx->s.driver_props.driverID == VK_DRIVER_ID_AMD_PROPRIETARY ?'
+$VulkanAv1Text = Get-Content -LiteralPath $VulkanAv1Source -Raw
+if ($VulkanAv1Text.Contains($VulkanAv1Original)) {
+    $VulkanAv1Text = $VulkanAv1Text.Replace($VulkanAv1Original, $VulkanAv1Patched)
+    Set-Content -LiteralPath $VulkanAv1Source -Value $VulkanAv1Text -NoNewline -Encoding utf8
+} elseif (-not $VulkanAv1Text.Contains($VulkanAv1PatchMarker)) {
+    throw 'FFmpeg vulkan_av1.c changed; the AMD AV1 tile-unit compatibility patch must be reviewed.'
+}
+
 # FFmpeg's native PNG decoder requires zlib. Keep it as an FFmpeg build
 # dependency, but do not expose or link zlib/libpng from the application.
 $ZlibArchive = Join-Path $BuildRoot "zlib-$ZlibVersion.zip"
