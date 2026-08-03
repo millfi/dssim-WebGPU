@@ -9,5 +9,6 @@
 .\tests\laptop.png	.\tests\laptop.d8.8.e7.jxl.png
 .\tests\laptop.png	.\tests\laptop.q24.jpegli.jpg.png
 .\tests\nv5_av1_vbr_7000_cutted.mp4	.\tests\nv5_av1_vbr_7000_x265lossless_cutted.mp4
-.\tests\raw1k.mp4	.\tests\nv5_hevc_vbr_6000.mp4
-.\tests\raw1k.mp4	.\tests\nv5_av1_vbr_7000.mp4
+.\tests\raw1k_lossless-cut.mp4	.\tests\nv5_hevc_vbr_6000_lossless-encode-cut.mp4
+.\tests\raw1k_62frames.mp4	.\tests\nv5_h264_vbr_9000_cutted.mp4
+.\tests\raw1k_lossless-cut.mp4	.\tests\nv5_av1_vbr_7000_cutted.mp4
