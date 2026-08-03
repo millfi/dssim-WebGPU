@@ -23,9 +23,15 @@ void main() {
     }
 
     vec2 position = (vec2(gid.xy) + vec2(0.5)) /
-                    vec2(params.width, params.height);
+                    vec2(textureSize(y_plane, 0));
     float y = texture(y_plane, position).r;
-    vec2 uv = texture(uv_plane, position).rg;
+    vec2 uv_position = position;
+    ivec2 uv_extent = textureSize(uv_plane, 0);
+    uv_position.x = (floor(position.x * float(uv_extent.x)) + 0.5) /
+                    float(uv_extent.x);
+    uv_position.y = (floor(position.y * float(uv_extent.y)) + 0.5) /
+                    float(uv_extent.y);
+    vec2 uv = texture(uv_plane, uv_position).rg;
 
     float max_code = float((1u << params.bit_depth) - 1u);
     if (params.full_range == 0u) {
