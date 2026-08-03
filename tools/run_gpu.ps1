@@ -118,16 +118,16 @@ if (-not [string]::IsNullOrWhiteSpace($options.Exe)) {
     $exePath = Resolve-PathSafe $options.Exe
 } else {
     $candidates = @(
-        (Join-Path $repoRoot "build/src_gpu/Release/dssim-WebGPU.exe"),
-        (Join-Path $repoRoot "build/src_gpu/Debug/dssim-WebGPU.exe"),
-        (Join-Path $repoRoot "build/src_gpu/dssim-WebGPU.exe")
+        (Join-Path $repoRoot "build/src_gpu/Release/dssim-Vulkan.exe"),
+        (Join-Path $repoRoot "build/src_gpu/Debug/dssim-Vulkan.exe"),
+        (Join-Path $repoRoot "build/src_gpu/dssim-Vulkan.exe")
     )
     $exePath = Get-FirstExistingPath -Candidates $candidates
 }
 
 if ([string]::IsNullOrWhiteSpace($exePath) -or
     -not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
-    throw "Vulkan GPU executable not found. Build target dssim_webgpu or pass --exe <path>."
+    throw "Vulkan GPU executable not found. Build target dssim_vulkan or pass --exe <path>."
 }
 
 $exeArgs = @($image1Path, $image2Path, "--out", $outPath)

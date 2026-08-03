@@ -1,18 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cmake --build build --config Release --target dssim_webgpu)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/gradation.png tests/gradation.png --out tests/out_same.json)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/gradation.png tests/gradation-fs8.png)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/gradation.png tests/gradation-256.png)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/0s.png tests/0.02s.png)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/1391p.png tests/1391p.jxl.png)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/laptop.png tests/laptop.d8.8.e7.jxl.png)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/gradation.png tests/gradation.png)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/laptop.png tests/laptop.q24.jpegli.jpg.png)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/gradation.png tests/gradation-fs8.png --out tests/out_grad_fs8.json)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/gradation.png tests/gradation-fs8.png --profiling)",
-      "Bash(build/src_gpu/Release/dssim-WebGPU.exe tests/laptop.png tests/laptop.d8.8.e7.jxl.png --profiling)"
+      "Bash(cmake --build build --config Release --target dssim_vulkan)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/gradation.png tests/gradation.png --out tests/out_same.json)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/gradation.png tests/gradation-fs8.png)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/gradation.png tests/gradation-256.png)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/0s.png tests/0.02s.png)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/1391p.png tests/1391p.jxl.png)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/laptop.png tests/laptop.d8.8.e7.jxl.png)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/gradation.png tests/gradation.png)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/laptop.png tests/laptop.q24.jpegli.jpg.png)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/gradation.png tests/gradation-fs8.png --out tests/out_grad_fs8.json)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/gradation.png tests/gradation-fs8.png --profiling)",
+      "Bash(build/src_gpu/Release/dssim-Vulkan.exe tests/laptop.png tests/laptop.d8.8.e7.jxl.png --profiling)"
     ]
   }
 }

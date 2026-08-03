@@ -106,9 +106,9 @@ try {
         throw "CMake configure failed with exit code $LASTEXITCODE."
     }
 
-    & cmake --build $BuildDirectory --config $Configuration --target dssim_webgpu
+    & cmake --build $BuildDirectory --config $Configuration --target dssim_vulkan
     if ($LASTEXITCODE -ne 0) {
-        throw "dssim_webgpu build failed with exit code $LASTEXITCODE."
+        throw "dssim_vulkan build failed with exit code $LASTEXITCODE."
     }
 } finally {
     Pop-Location

@@ -511,7 +511,7 @@ std::string BuildJson(
     }
 
     std::ostringstream command;
-    command << "dssim-WebGPU \"" << abs1 << "\" \"" << abs2 << "\"";
+    command << "dssim-Vulkan \"" << abs1 << "\" \"" << abs2 << "\"";
     if (!absOut.empty()) {
         command << " --out \"" << absOut << "\"";
     }
@@ -2660,7 +2660,7 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     }
     const VkApplicationInfo applicationInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "dssim-WebGPU",
+        .pApplicationName = "dssim-Vulkan",
         .applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
         .pEngineName = "dssim-vulkan",
         .engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
@@ -3850,7 +3850,7 @@ int main(int argc, char** argv) {
         }
         return 0;
     } catch (const std::exception& ex) {
-        std::cerr << "dssim-WebGPU error: " << ex.what() << '\n';
+        std::cerr << "dssim-Vulkan error: " << ex.what() << '\n';
         return 1;
     }
 }

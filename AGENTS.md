@@ -7,7 +7,7 @@
 - CMake sets this at the top level (`CMAKE_CXX_STANDARD=20`, `CMAKE_CXX_STANDARD_REQUIRED=ON`, `CMAKE_CXX_EXTENSIONS=OFF`).
 - Use PowerShell for every repository command. Do not provide Command Prompt, batch, Bash, or POSIX-shell commands.
 - Invoke executables and scripts with PowerShell's call operator (`&`) when appropriate.
-- `dssim_webgpu` always links the minimal FFmpeg Vulkan Video build under
+- `dssim_vulkan` always links the minimal FFmpeg Vulkan Video build under
   `third_party/ffmpeg-8.1.2-shared`, including for PNG-only work. If it is absent,
   create it with `& .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic` before configuring.
 
@@ -16,9 +16,9 @@
 1. Configure with normal command:
    - `& cmake -S . -B build`
 2. Build target:
-   - `& cmake --build build --config Release --target dssim_webgpu`
+   - `& cmake --build build --config Release --target dssim_vulkan`
 3. Run the fixed multi-pair benchmark command:
-   - `Get-Content .\tests\test_pairs.txt | & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling`
+   - `Get-Content .\tests\test_pairs.txt | & .\build\src_gpu\Release\dssim-Vulkan.exe --stdin-pairs --profiling`
 4. Mechanically compare scores with the local reference at
    `src_reference\target\release\dssim.exe`:
    - `& .\tools\check_regression.ps1`
@@ -44,9 +44,9 @@ regression check.
 
 For every video-affecting change:
 
-1. Build `dssim_webgpu` and run `& .\tools\check_regression.ps1`.
+1. Build `dssim_vulkan` and run `& .\tools\check_regression.ps1`.
 2. Run the repository video pair with profiling and CSV output:
-   - `& .\build\src_gpu\Release\dssim-WebGPU.exe .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 .\benchmark\3s.webm --profiling --csv .\out\video_scores.csv`
+   - `& .\build\src_gpu\Release\dssim-Vulkan.exe .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 .\benchmark\3s.webm --profiling --csv .\out\video_scores.csv`
 3. Require a successful exit, a finite average DSSIM, and a nonzero
    `frames=<N>` value. Confirm that the CSV header is
    `time_seconds,frame_number,dssim`, frame numbers are contiguous from 0, and
@@ -87,7 +87,7 @@ reference executable or a reproducibly generated same-input result.
 1. Identify the bottleneck using `--profiling` or `--out <json>` (see Profiling output section).
 2. Hypothesize an optimization.
 3. Implement the change.
-4. Build: `& cmake --build build --config Release --target dssim_webgpu`
+4. Build: `& cmake --build build --config Release --target dssim_vulkan`
 5. Run `& .\tools\check_regression.ps1` and confirm every pair passes.
 6. Measure timing improvement with `--profiling`.
 7. If improved without regression: commit with a clear message describing the optimization and measured speedup.
@@ -109,7 +109,7 @@ reference executable or a reproducibly generated same-input result.
 
 - Treat `tests/test_pairs.txt` as the executable regression list.
 - For each validation pass:
-  1. Build `dssim-WebGPU`.
+  1. Build `dssim-Vulkan`.
   2. Run the fixed benchmark command.
   3. Run `& .\tools\check_regression.ps1`.
   4. Require every pair to pass before committing.
@@ -149,6 +149,6 @@ reference executable or a reproducibly generated same-input result.
 
 ## C++20 proof point
 
-- Keep at least one designated initializer in `src_gpu/dssim-WebGPU.cpp` (for example `ParamsData` / `DecodedInputInfo`) so non-C++20 builds fail early.
+- Keep at least one designated initializer in `src_gpu/dssim-Vulkan.cpp` (for example `ParamsData` / `DecodedInputInfo`) so non-C++20 builds fail early.
 
 

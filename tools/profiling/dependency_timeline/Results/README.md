@@ -4,7 +4,7 @@
 `../Specification/dependency-timeline.ebnf`. Its durations were measured with:
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\tests\gradation.png `
     .\tests\gradation-256.png `
     --out .\build\dependency_timeline_profile.json `

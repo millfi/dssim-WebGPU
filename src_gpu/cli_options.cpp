@@ -145,7 +145,7 @@ CliOptions ParseArgs(int argc, char** argv) {
         }
     } else if (positionalCount != 2) {
         throw std::runtime_error(
-            "usage: dssim-WebGPU <img1> <img2> [--out <json>] "
+            "usage: dssim-Vulkan <img1> <img2> [--out <json>] "
             "[--csv <path>] [--pipeline-depth <N>] [--debug-dump-dir <dir>] "
             "[--stdin-pairs] [--profiling]");
     }

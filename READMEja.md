@@ -1,4 +1,4 @@
-# dssim-WebGPU
+# dssim-Vulkan
 
 DSSIM画像・動画比較アルゴリズムをC++20とVulkanで実装した高速化版です。
 コマンドラインとビルドの互換性を保つため、実行ファイル名とCMakeターゲット名は
@@ -43,7 +43,7 @@ or
 
 ```powershell
 & cmake -S . -B build
-& cmake --build build --config Release --target dssim_webgpu
+& cmake --build build --config Release --target dssim_vulkan
 ```
 
 `build_gpu.ps1`は展開前に固定SHA-256でarchiveを検証します。archiveがないか変更されて
@@ -55,7 +55,7 @@ repository内へdownloadしたvcpkgのdownload fileとbinary cacheはどちら�
 実行ファイルは次の場所に生成されます。
 
 ```text
-build\src_gpu\Release\dssim-WebGPU.exe
+build\src_gpu\Release\dssim-Vulkan.exe
 ```
 
 ルートのCMake設定は従来のconfigureコマンドとの互換性を維持し、
@@ -70,7 +70,7 @@ build\src_gpu\Release\shaders\*.spv
 ## 1ペアを比較する
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\tests\laptop.png `
     .\tests\laptop.q24.jpegli.jpg.png
 ```
@@ -84,7 +84,7 @@ build\src_gpu\Release\shaders\*.spv
 タイミングを表示するには `--profiling` を追加します。
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\tests\laptop.png `
     .\tests\laptop.q24.jpegli.jpg.png `
     --profiling
@@ -94,7 +94,7 @@ build\src_gpu\Release\shaders\*.spv
 `--out <json>` を使用します。
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\tests\laptop.png `
     .\tests\laptop.q24.jpegli.jpg.png `
     --profiling `
@@ -109,7 +109,7 @@ build\src_gpu\Release\shaders\*.spv
 画像ペアと同様に、2本の動画パスを指定します。
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 `
     .\benchmark\3s.webm `
     --profiling `
@@ -150,7 +150,7 @@ Vulkan Video queue familyを表示します。可能なら2本を別々の対応
 
 ```powershell
 Get-Content .\tests\test_pairs.txt |
-    & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling
+    & .\build\src_gpu\Release\dssim-Vulkan.exe --stdin-pairs --profiling
 ```
 
 `--stdin-pairs` ではVulkan instanceとdeviceを作成し、SPIR-Vを読み込んで
@@ -190,7 +190,7 @@ shader objectをプロセス内で一度だけ作成し、すべてのペアで�
 ```powershell
 & .\tools\check_regression.ps1 `
     -PairList .\tests\test_pairs.txt `
-    -GpuExecutable .\build\src_gpu\Release\dssim-WebGPU.exe `
+    -GpuExecutable .\build\src_gpu\Release\dssim-Vulkan.exe `
     -RelativeTolerance 0.01
 ```
 

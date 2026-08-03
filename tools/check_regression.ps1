@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$PairList = ".\tests\test_pairs.txt",
-    [string]$GpuExecutable = ".\build\src_gpu\Release\dssim-WebGPU.exe",
+    [string]$GpuExecutable = ".\build\src_gpu\Release\dssim-Vulkan.exe",
     [double]$RelativeTolerance = 0.01,
     [string]$IdentityImagePath = ".\tests\gradation.png",
     [string]$IdentityVideoPath = ".\benchmark\3s.webm"

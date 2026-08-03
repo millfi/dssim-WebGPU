@@ -1,5 +1,5 @@
 # Measured with:
-# dssim-WebGPU tests/gradation.png tests/gradation-256.png --out build/dependency_timeline_profile.json --profiling
+# dssim-Vulkan tests/gradation.png tests/gradation-256.png --out build/dependency_timeline_profile.json --profiling
 # CPU wall spans are sequential on the first line.
 begin_0 <-------------------------> end_0 -> begin_1 <------------------------> end_1 -> begin_2 <-----------> end_2 -> begin_3 <-------> end_3 -> begin_4 <-----> end_4 -> begin_5 <--> end_5
 # Timestamp Query executes asynchronously within the combined command-submit/readback wall interval.

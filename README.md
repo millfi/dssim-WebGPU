@@ -43,7 +43,7 @@ or
 
 ```powershell
 & cmake -S . -B build
-& cmake --build build --config Release --target dssim_webgpu
+& cmake --build build --config Release --target dssim_vulkan
 ```
 
 `build_gpu.ps1` verifies the archive with a fixed SHA-256 before extracting it.
@@ -56,7 +56,7 @@ and the binary cache stay under `third_party/vcpkg` rather than AppData.
 The executable is written to:
 
 ```text
-build\src_gpu\Release\dssim-WebGPU.exe
+build\src_gpu\Release\dssim-Vulkan.exe
 ```
 
 The root configuration keeps the existing command line and delegates the GPU
@@ -70,7 +70,7 @@ build\src_gpu\Release\shaders\*.spv
 ## Compare one pair
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\tests\laptop.png `
     .\tests\laptop.q24.jpegli.jpg.png
 ```
@@ -84,7 +84,7 @@ The score and compared path are printed to stdout:
 Add `--profiling` to print timing information:
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\tests\laptop.png `
     .\tests\laptop.q24.jpegli.jpg.png `
     --profiling
@@ -93,7 +93,7 @@ Add `--profiling` to print timing information:
 Add `--out <json>` for per-scale results and detailed timings:
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\tests\laptop.png `
     .\tests\laptop.q24.jpegli.jpg.png `
     --profiling `
@@ -108,7 +108,7 @@ score-matching investigations. This option is intended for PNG comparisons.
 Pass two video paths in the same way as an image pair:
 
 ```powershell
-& .\build\src_gpu\Release\dssim-WebGPU.exe `
+& .\build\src_gpu\Release\dssim-Vulkan.exe `
     .\benchmark\x264_medium_g40_fastdecode_crf40.mp4 `
     .\benchmark\3s.webm `
     --profiling `
@@ -149,7 +149,7 @@ Run the benchmark with this command:
 
 ```powershell
 Get-Content .\tests\test_pairs.txt |
-    & .\build\src_gpu\Release\dssim-WebGPU.exe --stdin-pairs --profiling
+    & .\build\src_gpu\Release\dssim-Vulkan.exe --stdin-pairs --profiling
 ```
 
 `--stdin-pairs` creates the Vulkan instance and device, loads the SPIR-V
@@ -193,7 +193,7 @@ Useful overrides:
 ```powershell
 & .\tools\check_regression.ps1 `
     -PairList .\tests\test_pairs.txt `
-    -GpuExecutable .\build\src_gpu\Release\dssim-WebGPU.exe `
+    -GpuExecutable .\build\src_gpu\Release\dssim-Vulkan.exe `
     -RelativeTolerance 0.01 `
     -IdentityImagePath .\tests\gradation.png `
     -IdentityVideoPath .\benchmark\3s.webm

@@ -41,23 +41,23 @@ if(NOT DSSIM_HAS_SHADER_OBJECT_HEADERS)
     )
 endif()
 
-add_executable(dssim_webgpu
+add_executable(dssim_vulkan
     cli_options.cpp
-    dssim-WebGPU.cpp
+    dssim-Vulkan.cpp
     image_loader.cpp
     video_decoder.cpp
 )
-set_target_properties(dssim_webgpu PROPERTIES
-    OUTPUT_NAME "dssim-WebGPU"
+set_target_properties(dssim_vulkan PROPERTIES
+    OUTPUT_NAME "dssim-Vulkan"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/src_gpu/$<CONFIG>"
 )
 
-target_compile_features(dssim_webgpu PRIVATE cxx_std_20)
-target_include_directories(dssim_webgpu PRIVATE
+target_compile_features(dssim_vulkan PRIVATE cxx_std_20)
+target_include_directories(dssim_vulkan PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${DSSIM_FFMPEG_INCLUDE_DIR}"
 )
-target_link_libraries(dssim_webgpu PRIVATE
+target_link_libraries(dssim_vulkan PRIVATE
     Vulkan::Vulkan
     "${DSSIM_FFMPEG_AVCODEC_LIBRARY}"
     "${DSSIM_FFMPEG_AVFORMAT_LIBRARY}"
@@ -66,17 +66,17 @@ target_link_libraries(dssim_webgpu PRIVATE
 )
 
 if(WIN32)
-    add_custom_command(TARGET dssim_webgpu POST_BUILD
+    add_custom_command(TARGET dssim_vulkan POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${DSSIM_FFMPEG_ROOT}/bin"
-            "$<TARGET_FILE_DIR:dssim_webgpu>"
+            "$<TARGET_FILE_DIR:dssim_vulkan>"
         COMMENT "Copying dynamically linked FFmpeg Vulkan Video DLLs")
 endif()
 
 if(MSVC)
-    target_compile_options(dssim_webgpu PRIVATE /W4 /EHsc)
+    target_compile_options(dssim_vulkan PRIVATE /W4 /EHsc)
 else()
-    target_compile_options(dssim_webgpu PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(dssim_vulkan PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 set(DSSIM_GPU_SHADER_NAMES
@@ -118,7 +118,7 @@ foreach(DSSIM_GPU_SHADER_NAME IN LISTS DSSIM_GPU_SHADER_NAMES)
     list(APPEND DSSIM_GPU_SHADER_OUTPUTS "${DSSIM_GPU_SHADER_OUTPUT}")
 endforeach()
 
-add_custom_target(dssim_webgpu_shaders
+add_custom_target(dssim_vulkan_shaders
     DEPENDS ${DSSIM_GPU_SHADER_OUTPUTS}
 )
-add_dependencies(dssim_webgpu dssim_webgpu_shaders)
+add_dependencies(dssim_vulkan dssim_vulkan_shaders)

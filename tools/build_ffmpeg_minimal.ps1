@@ -322,7 +322,7 @@ $LinkageArguments = if ($Linkage -eq 'Dynamic') {
 }
 
 # Keep only the containers, parsers, codecs, and hardware accelerators needed
-# by the two consumers of this shared prefix. dssim-WebGPU consumes
+# by the two consumers of this shared prefix. dssim-Vulkan consumes
 # AV_PIX_FMT_VULKAN frames, while src_reference uses AV_PIX_FMT_D3D11 frames.
 # Still images use the CPU-side libswscale conversion to RGBA8.
 $ConfigureArguments = @(
@@ -403,4 +403,4 @@ if ($Linkage -eq 'Dynamic') {
 Write-Host "Minimal $Linkage FFmpeg installed at $Prefix"
 Write-Host 'Configure and build the Vulkan GPU executable with:'
 Write-Host '  & cmake -S . -B build'
-Write-Host '  & cmake --build build --config Release --target dssim_webgpu'
+Write-Host '  & cmake --build build --config Release --target dssim_vulkan'
