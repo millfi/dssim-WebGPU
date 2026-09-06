@@ -1,18 +1,18 @@
 # dssim-Vulkan
 
 
-This is an accelerated implementation of the DSSIM image similarity evaluation algorithm using C++20 and Vulkan, with added video support.
+This is an accelerated implementation of the DSSIM image similarity evaluation algorithm using C++20 and [NoGraphicsAPI](https://github.com/sebbbi/NoGraphicsAPI) (Vulkan), with added video support.
 
 
 ## Requirements
 
 
 - Windows with a Vulkan GPU and driver supporting the following features:
-  - Vulkan 1.3
-  - `VK_EXT_shader_object`
-  - `VK_KHR_push_descriptor`
-  - Vulkan 1.3 `synchronization2` and `dynamicRendering` features
-- Vulkan SDK including the Vulkan loader library and headers, and `glslc`
+  - Vulkan 1.4
+  - `VK_EXT_descriptor_heap`
+  - `VK_KHR_device_address_commands`, `VK_KHR_shader_untyped_pointers`, `VK_EXT_mesh_shader`
+  - Vulkan 1.4 `synchronization2` and `dynamicRendering` features
+- Vulkan SDK including the Vulkan loader library and headers, and `slangc` (2026.14.1+) / `spirv-val` (2026.3+)
 - PowerShell
 - CMake 3.24 or later
 - C++20 compatible compiler
@@ -22,11 +22,25 @@ This is an accelerated implementation of the DSSIM image similarity evaluation a
 The top-level CMake configuration automatically selects C++20, so you do not need to specify additional C++ standard flags during the build.
 
 
-CMake detects the SDK using `find_package(Vulkan REQUIRED COMPONENTS glslc)`. CMake can use `VULKAN_SDK`, which is set by standard Vulkan SDK installations. There is no automated SDK retrieval process.
+CMake detects the SDK using `find_package(Vulkan 1.4.357 REQUIRED)`. CMake can use `VULKAN_SDK`, which is set by standard Vulkan SDK installations. There is no automated SDK retrieval process.
 
 
 Inputs are either PNG images of the same width and height, or two videos. Video containers are determined by the extensions `.mp4`, `.m4v`, `.mov`, `.mkv`, and `.webm`. `AV_PIX_FMT_VULKAN` frames are received from the FFmpeg Vulkan Video decoder (H.264/HEVC/VP9/AV1), and NV12 or P010 Vulkan images are converted to RGBA8 on the GPU. There is no CPU readback of decoded frames.
 
+
+NoGraphicsAPI is pinned in third_party/NoGraphicsAPI. Its README.dssim.md describes
+the local FFmpeg interop extensions. Coherent, host-visible device-local memory
+(Resizable BAR or UMA) is required. The .comp files contain Slang, selected with
+-lang slang; their root ABI is shared with C++ in src_gpu/shaders/compute_root.h.
+Vulkan SDK 1.4.357+ is required.
+
+Install the pinned Windows Slang compiler in the repository with:
+
+```powershell
+& .\tools\setup_slang.ps1
+```
+
+Run build commands from a Developer PowerShell with the C++ toolchain loaded.
 
 ## build
 ```powershell
@@ -54,7 +68,7 @@ build\src_gpu\Release\dssim-Vulkan.exe
 ```
 
 
-The root CMake configuration maintains compatibility with conventional configure commands, delegating GPU target definitions to `src_gpu/CMakeLists.txt`. During the build, `glslc` compiles the GLSL compute shaders in `src_gpu/shaders` to SPIR-V and places them next to the executable:
+The root CMake configuration maintains compatibility with conventional configure commands, delegating GPU target definitions to `src_gpu/CMakeLists.txt`. During the build, `slangc` compiles the Slang compute shaders in `src_gpu/shaders` to SPIR-V and places them next to the executable:
 
 
 ```text
@@ -153,7 +167,7 @@ Get-Content .\tests\test_pairs.txt |
 ```
 
 
-With `--stdin-pairs`, a Vulkan instance and device are created, SPIR-V is loaded, and shader objects are created once within the process and reused for all pairs. Because image resolutions are specified by push constants and dispatch counts, there is no need to recreate shader objects even if resolutions differ.
+With `--stdin-pairs`, a Vulkan instance and device are created, SPIR-V is loaded, and compute PSOs are created once within the process and reused for all pairs. Because image resolutions are specified by root data and dispatch counts, there is no need to recreate compute PSOs even if resolutions differ.
 
 
 `--stdin-pairs` cannot be used simultaneously with `--out`, `--csv`, `--pipeline-depth`, or `--debug-dump-dir`.
@@ -198,7 +212,7 @@ When `--profiling` is specified, mutually exclusive wall-clock time intervals an
 
 Session initialization:
 
-- `session_init_pipeline_setup_ms`: Creation of pipeline layout and shader objects
+- `session_init_pipeline_setup_ms`: Creation of NoGraphicsAPI compute PSOs
 - `session_init_resource_prep_ms`: Session-level resource preparation
 - `session_init_gpu_submit_wait_ms`: Session-level GPU submission and waiting
 - `session_init_gpu_timestamp_ms`: Vulkan timestamp query time per session
@@ -231,18 +245,18 @@ Using `--out <json>` outputs the following detailed items to the `profiling` obj
 - `post_process_remaining_scales_ms`
 - `post_process_ms`
 
-`dispatch_and_submit_ms` is the CPU-side command construction and submission time, not the pure shader execution time. `readback_ms` includes GPU completion waiting and host readback time. Because the CPU and GPU overlap asynchronously, `gpu_timestamp_ms` is not included in the sum of wall-clock time intervals. The two scale-specific post-process items are also independent times that overlap with each other during parallel aggregation. JSON field names are maintained for compatibility. Since shader objects are used, `create_pso_ms` and `create_bind_group_ms` are expected to be 0. Shader object and pipeline layout processing are accounted for in the corresponding existing buckets. Timestamp queries are an optional feature; comparison processing and wall-clock profiling will work even if the queue does not support them.
+`dispatch_and_submit_ms` is the CPU-side command construction and submission time, not the pure shader execution time. `readback_ms` includes GPU completion waiting and host readback time. Because the CPU and GPU overlap asynchronously, `gpu_timestamp_ms` is not included in the sum of wall-clock time intervals. The two scale-specific post-process items are also independent times that overlap with each other during parallel aggregation. JSON field names are maintained for compatibility. For compatibility with existing profiling consumers, NoGraphicsAPI PSO creation is recorded in `create_shader_module_ms`. The legacy `create_pso_ms`, `create_pipeline_layout_ms` and `create_bind_group_ms` fields remain zero. Timestamp queries are an optional feature; comparison processing and wall-clock profiling will work even if the queue does not support them.
 
 ## Current Optimization Design
 
-- Shader objects are created only once per process and reused across all resolutions
+- Compute PSOs are created only once per process and reused across all resolutions
 - Staging buffers are expanded up to the largest image processed so far and reused for each scale and subsequent pairs
-- Push descriptors eliminate descriptor pool and descriptor set allocations
+- GPU addresses in root data eliminate buffer descriptors; video textures use application-owned descriptor heapss
 - Debug statistics resources are cached separately from the regular benchmark path
 - A 256-element lookup table is used for sRGB-to-linear conversion
 - In the normal path, two inputs are converted on the GPU, and image pyramids for all scales are built without any intermediate round-trip to the CPU
 - In the debug path, pixel conversion and image pyramid generation are performed in parallel on the CPU so that intermediate scale data can be retained and output
-- Normal execution reads back only the SSIM map
+- Normal execution reads back only the per-scale reduction results
 
 ## Implementation Constraints
 
@@ -253,13 +267,13 @@ Using `--out <json>` outputs the following detailed items to the `profiling` obj
 
 ## Vulkan SDK and Shaders
 
-Install the Vulkan SDK before configuring. The build requires the SDK's loader library, headers, and `glslc`; configure will terminate with a clear error if any of these are missing. You can check the shader compiler from PowerShell:
+Install the Vulkan SDK before configuring. The build requires the SDK's loader library, headers, and `slangc` (2026.14.1+) / `spirv-val` (2026.3+); configure will terminate with a clear error if any of these are missing. You can check the shader compiler from PowerShell:
 
 ```powershell
-& glslc --version
+& .\third_party\slang-2026.14.1\bin\slangc.exe -version
 ```
 
-The following GLSL compute shaders are compiled to SPIR-V during the build. Shader compilation is not performed at application startup.
+The following Slang compute shaders are compiled to SPIR-V during the build. Shader compilation is not performed at application startup.
 
 - `rgba8_to_linear.comp`
 - `vulkan_yuv_to_rgba8.comp`

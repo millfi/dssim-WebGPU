@@ -1,42 +1,26 @@
-#version 460
+#include "compute_root.h"
+[[vk::push_constant]] ConstantBuffer<ComputeRoot> root;
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
-
-layout(std430, set = 0, binding = 0) readonly buffer InputRgba8Buffer {
-    uint values[];
-} in_rgba8;
-
-layout(std430, set = 0, binding = 1) writeonly buffer OutputLinearBuffer {
-    vec4 values[];
-} out_linear;
-
-layout(std430, set = 0, binding = 2) readonly buffer SrgbToLinearLutBuffer {
-    float values[];
-} srgb_to_linear_lut;
-
-layout(push_constant) uniform Params {
-    uint len;
-    uint width;
-    uint height;
-    uint unused;
-} params;
-
-void main() {
-    uvec3 gid = gl_GlobalInvocationID;
-    if (gid.x >= params.width || gid.y >= params.height) {
+[numthreads(16, 16, 1)]
+void computeMain(uint3 dispatchID : SV_DispatchThreadID,
+                 uint3 groupThreadID : SV_GroupThreadID,
+                 uint groupIndex : SV_GroupIndex,
+                 uint3 groupID : SV_GroupID) {
+    uint3 gid = dispatchID;
+    if (gid.x >= root.params[1] || gid.y >= root.params[2]) {
         return;
     }
 
-    uint i = gid.y * params.width + gid.x;
-    uint packed = in_rgba8.values[i];
+    uint i = gid.y * root.params[1] + gid.x;
+    uint packed = ((uint*)root.buffers[0])[i];
     uint r = packed & 255u;
     uint g = (packed >> 8u) & 255u;
     uint b = (packed >> 16u) & 255u;
     float a = float((packed >> 24u) & 255u) * (1.0 / 255.0);
-    out_linear.values[i] = vec4(
-        srgb_to_linear_lut.values[r] * a,
-        srgb_to_linear_lut.values[g] * a,
-        srgb_to_linear_lut.values[b] * a,
+    ((float4*)root.buffers[1])[i] = float4(
+        ((float*)root.buffers[2])[r] * a,
+        ((float*)root.buffers[2])[g] * a,
+        ((float*)root.buffers[2])[b] * a,
         a
     );
 }

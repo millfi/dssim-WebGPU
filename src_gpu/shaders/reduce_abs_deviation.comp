@@ -1,56 +1,40 @@
-#version 450
+#include "compute_root.h"
+[[vk::push_constant]] ConstantBuffer<ComputeRoot> root;
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+groupshared float comparisonCenter;
+groupshared float partialSums[256];
 
-layout(set = 0, binding = 0, std430) readonly buffer SsimValues {
-    float values[];
-} ssimValues;
-
-layout(set = 0, binding = 1, std430) readonly buffer SsimSum {
-    float value;
-} ssimSum;
-
-layout(set = 0, binding = 2, std430) writeonly buffer OutputSums {
-    float sums[];
-} outputSums;
-
-layout(push_constant) uniform Params {
-    uint len;
-    uint width;
-    uint height;
-    uint level;
-} params;
-
-shared float comparisonCenter;
-shared float partialSums[256];
-
-void main() {
-    const uint localIndex = gl_LocalInvocationIndex;
+[numthreads(16, 16, 1)]
+void computeMain(uint3 dispatchID : SV_DispatchThreadID,
+                 uint3 groupThreadID : SV_GroupThreadID,
+                 uint groupIndex : SV_GroupIndex,
+                 uint3 groupID : SV_GroupID) {
+    const uint localIndex = groupIndex;
     if (localIndex == 0) {
-        const float meanSsim = ssimSum.value / float(params.len);
-        comparisonCenter = pow(max(meanSsim, 0.0), exp2(-float(params.level)));
+        const float meanSsim = ((float*)root.buffers[1])[0] / float(root.params[0]);
+        comparisonCenter = pow(max(meanSsim, 0.0), exp2(-float(root.params[3])));
     }
-    barrier();
+    GroupMemoryBarrierWithGroupSync();
 
-    const uvec2 pixel = gl_GlobalInvocationID.xy;
+    const uint2 pixel = dispatchID.xy;
     float value = 0.0;
-    if (pixel.x < params.width && pixel.y < params.height) {
+    if (pixel.x < root.params[1] && pixel.y < root.params[2]) {
         value = abs(comparisonCenter -
-                    ssimValues.values[pixel.y * params.width + pixel.x]);
+                    ((float*)root.buffers[0])[pixel.y * root.params[1] + pixel.x]);
     }
     partialSums[localIndex] = value;
-    barrier();
+    GroupMemoryBarrierWithGroupSync();
 
     for (uint stride = 128; stride > 0; stride >>= 1) {
         if (localIndex < stride) {
             partialSums[localIndex] += partialSums[localIndex + stride];
         }
-        barrier();
+        GroupMemoryBarrierWithGroupSync();
     }
 
     if (localIndex == 0) {
         const uint outputIndex =
-            gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
-        outputSums.sums[outputIndex] = partialSums[0];
+            groupID.y * ((root.params[1] + 15u) / 16u) + groupID.x;
+        ((float*)root.buffers[2])[outputIndex] = partialSums[0];
     }
 }

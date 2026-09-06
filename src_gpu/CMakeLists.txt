@@ -1,4 +1,23 @@
-find_package(Vulkan 1.3 REQUIRED COMPONENTS glslc)
+find_package(Vulkan 1.4.357 REQUIRED)
+find_program(DSSIM_SLANGC NAMES slangc
+    HINTS "${CMAKE_SOURCE_DIR}/third_party/slang-2026.14.1/bin" "$ENV{VULKAN_SDK}/Bin" REQUIRED)
+execute_process(COMMAND "${DSSIM_SLANGC}" -version OUTPUT_VARIABLE slang_version
+    ERROR_VARIABLE slang_version_error RESULT_VARIABLE slang_version_result)
+string(APPEND slang_version "${slang_version_error}")
+if(NOT slang_version_result EQUAL 0 OR NOT slang_version MATCHES "([0-9]+\\.[0-9]+\\.[0-9]+)")
+    message(FATAL_ERROR "Cannot determine Slang version: ${slang_version}")
+endif()
+if(CMAKE_MATCH_1 VERSION_LESS "2026.14.1")
+    message(FATAL_ERROR "Slang 2026.14.1+ is required. Run tools/setup_slang.ps1 or set DSSIM_SLANGC.")
+endif()
+find_program(DSSIM_SPIRV_VAL NAMES spirv-val HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
+add_library(NoGraphicsAPI STATIC
+    "${CMAKE_SOURCE_DIR}/third_party/NoGraphicsAPI/src/NoGraphicsAPI.cpp")
+target_include_directories(NoGraphicsAPI PUBLIC
+    "${CMAKE_SOURCE_DIR}/third_party/NoGraphicsAPI/include")
+target_link_libraries(NoGraphicsAPI PUBLIC Vulkan::Vulkan)
+target_compile_features(NoGraphicsAPI PUBLIC cxx_std_20)
+
 
 set(DSSIM_FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/third_party/ffmpeg-8.1.2-shared" CACHE PATH
     "FFmpeg prefix containing the Vulkan Video development headers and import libraries")
@@ -22,25 +41,6 @@ if(NOT DSSIM_FFMPEG_INCLUDE_DIR OR NOT DSSIM_FFMPEG_AVCODEC_LIBRARY OR
         "Run tools/build_ffmpeg_minimal.ps1 -Linkage Dynamic first.")
 endif()
 
-include(CheckCXXSourceCompiles)
-set(CMAKE_REQUIRED_INCLUDES "${Vulkan_INCLUDE_DIRS}")
-check_cxx_source_compiles([=[
-    #include <vulkan/vulkan.h>
-    int main() {
-        VkShaderEXT shader = VK_NULL_HANDLE;
-        VkPhysicalDeviceShaderObjectFeaturesEXT features{};
-        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT;
-        return shader == VK_NULL_HANDLE && features.sType != 0 ? 0 : 1;
-    }
-]=] DSSIM_HAS_SHADER_OBJECT_HEADERS)
-unset(CMAKE_REQUIRED_INCLUDES)
-if(NOT DSSIM_HAS_SHADER_OBJECT_HEADERS)
-    message(FATAL_ERROR
-        "The Vulkan SDK headers do not provide VK_EXT_shader_object. "
-        "Install a current Vulkan SDK."
-    )
-endif()
-
 add_executable(dssim_vulkan
     cli_options.cpp
     dssim-Vulkan.cpp
@@ -58,7 +58,7 @@ target_include_directories(dssim_vulkan PRIVATE
     "${DSSIM_FFMPEG_INCLUDE_DIR}"
 )
 target_link_libraries(dssim_vulkan PRIVATE
-    Vulkan::Vulkan
+    NoGraphicsAPI
     "${DSSIM_FFMPEG_AVCODEC_LIBRARY}"
     "${DSSIM_FFMPEG_AVFORMAT_LIBRARY}"
     "${DSSIM_FFMPEG_AVUTIL_LIBRARY}"
@@ -105,13 +105,16 @@ foreach(DSSIM_GPU_SHADER_NAME IN LISTS DSSIM_GPU_SHADER_NAMES)
         OUTPUT "${DSSIM_GPU_SHADER_OUTPUT}"
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "${DSSIM_GPU_SHADER_OUTPUT_DIR}"
-        COMMAND "$<TARGET_FILE:Vulkan::glslc>"
-            --target-env=vulkan1.2
-            -fshader-stage=compute
-            -O
+        COMMAND "${DSSIM_SLANGC}"
+            -lang slang -target spirv -profile spirv_1_5
+            -emit-spirv-directly -fvk-use-entrypoint-name -fvk-use-c-layout
+            -matrix-layout-row-major -capability spvDescriptorHeapEXT
+            -entry computeMain -stage compute -O2
             "${DSSIM_GPU_SHADER_SOURCE}"
             -o "${DSSIM_GPU_SHADER_OUTPUT}"
-        DEPENDS "${DSSIM_GPU_SHADER_SOURCE}"
+        COMMAND "${DSSIM_SPIRV_VAL}" --target-env vulkan1.4 --scalar-block-layout
+            "${DSSIM_GPU_SHADER_OUTPUT}"
+        DEPENDS "${DSSIM_GPU_SHADER_SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/compute_root.h"
         COMMENT "Compiling ${DSSIM_GPU_SHADER_NAME}.comp to SPIR-V"
         VERBATIM
     )

@@ -25,7 +25,8 @@
 #include <numeric>
 #include <span>
 
-#include <vulkan/vulkan.h>
+#include <NoGraphicsAPI/NoGraphicsAPI_vulkan.hpp>
+#include "shaders/compute_root.h"
 
 #include "cli_options.h"
 #include "image_loader.h"
@@ -143,82 +144,56 @@ struct RgbaPairComparisonResult {
     std::vector<LinearRgba> debugScale1Image2;
 };
 
-struct VulkanBuffer {
-    VkDevice device = VK_NULL_HANDLE;
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkDeviceSize size = 0;
+struct GpuBuffer {
+    gpu::GpuHeap heap{};
+    std::uint64_t size = 0;
     void* mapped = nullptr;
-    bool hostCoherent = false;
 
-    VulkanBuffer() = default;
-    ~VulkanBuffer() { Reset(); }
-    VulkanBuffer(const VulkanBuffer&) = delete;
-    VulkanBuffer& operator=(const VulkanBuffer&) = delete;
-    VulkanBuffer(VulkanBuffer&& other) noexcept { *this = std::move(other); }
-    VulkanBuffer& operator=(VulkanBuffer&& other) noexcept {
+    GpuBuffer() = default;
+    ~GpuBuffer() { Reset(); }
+    GpuBuffer(const GpuBuffer&) = delete;
+    GpuBuffer& operator=(const GpuBuffer&) = delete;
+    GpuBuffer(GpuBuffer&& other) noexcept { *this = std::move(other); }
+    GpuBuffer& operator=(GpuBuffer&& other) noexcept {
         if (this != &other) {
             Reset();
-            device = std::exchange(other.device, VK_NULL_HANDLE);
-            buffer = std::exchange(other.buffer, VK_NULL_HANDLE);
-            memory = std::exchange(other.memory, VK_NULL_HANDLE);
+            heap = std::exchange(other.heap, {});
             size = std::exchange(other.size, 0);
             mapped = std::exchange(other.mapped, nullptr);
-            hostCoherent = std::exchange(other.hostCoherent, false);
         }
         return *this;
     }
-    explicit operator bool() const noexcept { return buffer != VK_NULL_HANDLE; }
+    explicit operator bool() const noexcept { return heap.owner != nullptr; }
     void Reset() noexcept {
-        if (device != VK_NULL_HANDLE) {
-            if (mapped != nullptr && memory != VK_NULL_HANDLE) {
-                vkUnmapMemory(device, memory);
-            }
-            if (buffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(device, buffer, nullptr);
-            }
-            if (memory != VK_NULL_HANDLE) {
-                vkFreeMemory(device, memory, nullptr);
-            }
-        }
-        device = VK_NULL_HANDLE;
-        buffer = VK_NULL_HANDLE;
-        memory = VK_NULL_HANDLE;
+        if (heap.owner) gpu::destroy_gpu_heap(heap);
+        heap = {};
         size = 0;
         mapped = nullptr;
-        hostCoherent = false;
     }
 };
 
-struct Stage0Resources {
-    VkDeviceSize workspaceCapacity = 0;
-    VkDeviceSize uploadCapacity = 0;
-    VkDeviceSize readbackCapacity = 0;
-    VulkanBuffer workspace;
-    VulkanBuffer upload;
-    VulkanBuffer readback;
-};
-
-struct BatchStage0Resources {
-    VkDeviceSize workspaceCapacity = 0;
-    VkDeviceSize uploadCapacity = 0;
-    VkDeviceSize readbackCapacity = 0;
-    VulkanBuffer workspace;
-    VulkanBuffer upload;
-    VulkanBuffer readback;
-};
-
-struct ComputeShader {
-    VkShaderEXT shader = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+struct ComputeArenas {
+    std::uint64_t workspaceCapacity = 0;
+    std::uint64_t uploadCapacity = 0;
+    std::uint64_t readbackCapacity = 0;
+    GpuBuffer workspace;
+    GpuBuffer upload;
+    GpuBuffer readback;
 };
 
 struct GpuSession {
+    gpu::Device* gpuDevice = nullptr;
+    gpu::CommandBuffer* commands = nullptr;
+    gpu::TimelineSemaphore* completion = nullptr;
+    std::uint64_t completionValue = 0;
+    ComputeRoot root{};
+    gpu::GpuHeap videoTextureHeap{};
+    gpu::GpuHeap videoSamplerHeap{};
+    PFN_vkWriteResourceDescriptorsEXT writeResourceDescriptors = nullptr;
+    // Borrowed handles for FFmpeg interoperability and timestamp queries.
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
-    VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queueFamilyIndex = 0;
     VkQueueFlags computeQueueFlags = 0;
     std::uint32_t videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -234,29 +209,21 @@ struct GpuSession {
     bool timestampQueryEnabled = false;
     std::uint32_t timestampValidBits = 0;
     VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
-    VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkFence submitFence = VK_NULL_HANDLE;
 
-    PFN_vkCreateShadersEXT createShaders = nullptr;
-    PFN_vkDestroyShaderEXT destroyShader = nullptr;
-    PFN_vkCmdBindShadersEXT cmdBindShaders = nullptr;
-    PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
 
-    ComputeShader preprocessShader;
-    ComputeShader stage0Shader;
-    ComputeShader stage0ScoreShader;
-    ComputeShader reduceSumShader;
-    ComputeShader reduceAbsDeviationShader;
-    ComputeShader downsampleShader;
-    ComputeShader rgba8ToLinearShader;
-    ComputeShader vulkanYuvToRgbaShader;
-    VkSampler videoYSampler = VK_NULL_HANDLE;
-    VkSampler videoUvSampler = VK_NULL_HANDLE;
-    VulkanBuffer srgbToLinearLutBuffer;
+    gpu::PSO* preprocessShader = nullptr;
+    gpu::PSO* stage0Shader = nullptr;
+    gpu::PSO* stage0ScoreShader = nullptr;
+    gpu::PSO* reduceSumShader = nullptr;
+    gpu::PSO* reduceAbsDeviationShader = nullptr;
+    gpu::PSO* downsampleShader = nullptr;
+    gpu::PSO* rgba8ToLinearShader = nullptr;
+    gpu::PSO* vulkanYuvToRgbaShader = nullptr;
+    GpuBuffer srgbToLinearLutBuffer;
 
-    std::unique_ptr<Stage0Resources> debugStage0Resources;
-    std::unique_ptr<BatchStage0Resources> batchStage0Resources;
+    std::unique_ptr<ComputeArenas> debugComputeArenas;
+    std::unique_ptr<ComputeArenas> batchComputeArenas;
 
     ProfilingSummary initProfiling;
 
@@ -714,7 +681,7 @@ void VkCheck(VkResult result, const std::string_view operation) {
     }
 }
 
-VkDeviceSize AlignUp(VkDeviceSize value, VkDeviceSize alignment) {
+std::uint64_t AlignUp(std::uint64_t value, std::uint64_t alignment) {
     return ((value + alignment - 1u) / alignment) * alignment;
 }
 
@@ -737,175 +704,45 @@ std::vector<std::uint32_t> ReadSpirv(const std::filesystem::path& path) {
     return code;
 }
 
-std::uint32_t FindMemoryType(
-    const GpuSession& session,
-    std::uint32_t allowedTypes,
-    VkMemoryPropertyFlags required,
-    VkMemoryPropertyFlags preferred) {
-    VkPhysicalDeviceMemoryProperties properties{};
-    vkGetPhysicalDeviceMemoryProperties(session.physicalDevice, &properties);
-    std::uint32_t bestIndex = std::numeric_limits<std::uint32_t>::max();
-    int bestScore = -1;
-    for (std::uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
-        if ((allowedTypes & (1u << i)) == 0u) {
-            continue;
-        }
-        const VkMemoryPropertyFlags flags = properties.memoryTypes[i].propertyFlags;
-        if ((flags & required) != required) {
-            continue;
-        }
-        int score = 0;
-        for (std::uint32_t bit = 0; bit < 32u; ++bit) {
-            score += ((flags & preferred & (1u << bit)) != 0u) ? 1 : 0;
-        }
-        if (score > bestScore) {
-            bestScore = score;
-            bestIndex = i;
-        }
-    }
-    if (bestIndex == std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error("no compatible Vulkan memory type");
-    }
-    return bestIndex;
-}
-
-VulkanBuffer CreateBuffer(
-    const GpuSession& session,
-    VkDeviceSize byteSize,
-    VkBufferUsageFlags usage,
-    VkMemoryPropertyFlags required,
-    VkMemoryPropertyFlags preferred = 0) {
-    VulkanBuffer result;
-    result.device = session.device;
-    result.size = std::max<VkDeviceSize>(byteSize, 4u);
-    const VkBufferCreateInfo bufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = result.size,
-        .usage = usage,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    };
-    VkCheck(vkCreateBuffer(session.device, &bufferInfo, nullptr, &result.buffer), "vkCreateBuffer");
-
-    VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(session.device, result.buffer, &requirements);
-    const std::uint32_t memoryTypeIndex =
-        FindMemoryType(session, requirements.memoryTypeBits, required, preferred);
-    const VkMemoryAllocateInfo allocationInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = requirements.size,
-        .memoryTypeIndex = memoryTypeIndex,
-    };
-    VkCheck(
-        vkAllocateMemory(session.device, &allocationInfo, nullptr, &result.memory),
-        "vkAllocateMemory");
-    VkCheck(vkBindBufferMemory(session.device, result.buffer, result.memory, 0), "vkBindBufferMemory");
-
-    VkPhysicalDeviceMemoryProperties memoryProperties{};
-    vkGetPhysicalDeviceMemoryProperties(session.physicalDevice, &memoryProperties);
-    const VkMemoryPropertyFlags actualFlags =
-        memoryProperties.memoryTypes[memoryTypeIndex].propertyFlags;
-    result.hostCoherent = (actualFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
-    if ((actualFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
-        VkCheck(
-            vkMapMemory(session.device, result.memory, 0, VK_WHOLE_SIZE, 0, &result.mapped),
-            "vkMapMemory");
-    }
+GpuBuffer CreateBuffer(const GpuSession& session, std::uint64_t byteSize, gpu::MemoryType memory) {
+    GpuBuffer result;
+    result.heap = gpu::create_gpu_heap(session.gpuDevice, std::max<std::uint64_t>(byteSize, 4u), memory);
+    if (!result.heap.owner) throw std::runtime_error("NoGraphicsAPI GPU allocation failed");
+    result.size = result.heap.range.size;
+    result.mapped = result.heap.range.cpu;
     return result;
 }
 
-void FlushMappedBuffer(const VulkanBuffer& buffer) {
-    if (buffer.mapped == nullptr) {
-        throw std::runtime_error("attempted to flush an unmapped Vulkan buffer");
-    }
-    if (!buffer.hostCoherent) {
-        const VkMappedMemoryRange range = {
-            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-            .memory = buffer.memory,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        };
-        VkCheck(vkFlushMappedMemoryRanges(buffer.device, 1, &range), "vkFlushMappedMemoryRanges");
-    }
-}
-
-void InvalidateMappedBuffer(const VulkanBuffer& buffer) {
-    if (buffer.mapped == nullptr) {
-        throw std::runtime_error("attempted to invalidate an unmapped Vulkan buffer");
-    }
-    if (!buffer.hostCoherent) {
-        const VkMappedMemoryRange range = {
-            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-            .memory = buffer.memory,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        };
-        VkCheck(
-            vkInvalidateMappedMemoryRanges(buffer.device, 1, &range),
-            "vkInvalidateMappedMemoryRanges");
-    }
-}
-
-void DestroyComputeShader(GpuSession& session, ComputeShader& shader) noexcept {
-    if (shader.shader != VK_NULL_HANDLE && session.destroyShader != nullptr) {
-        session.destroyShader(session.device, shader.shader, nullptr);
-    }
-    if (shader.pipelineLayout != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(session.device, shader.pipelineLayout, nullptr);
-    }
-    if (shader.descriptorSetLayout != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(session.device, shader.descriptorSetLayout, nullptr);
-    }
-    shader = {};
-}
-
 GpuSession::~GpuSession() {
-    if (device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device);
-        debugStage0Resources.reset();
-        batchStage0Resources.reset();
-        srgbToLinearLutBuffer.Reset();
-        DestroyComputeShader(*this, rgba8ToLinearShader);
-        DestroyComputeShader(*this, preprocessShader);
-        DestroyComputeShader(*this, stage0Shader);
-        DestroyComputeShader(*this, stage0ScoreShader);
-        DestroyComputeShader(*this, reduceSumShader);
-        DestroyComputeShader(*this, reduceAbsDeviationShader);
-        DestroyComputeShader(*this, downsampleShader);
-        DestroyComputeShader(*this, vulkanYuvToRgbaShader);
-        if (videoYSampler != VK_NULL_HANDLE) {
-            vkDestroySampler(device, videoYSampler, nullptr);
-        }
-        if (videoUvSampler != VK_NULL_HANDLE) {
-            vkDestroySampler(device, videoUvSampler, nullptr);
-        }
-        if (timestampQueryPool != VK_NULL_HANDLE) {
-            vkDestroyQueryPool(device, timestampQueryPool, nullptr);
-        }
-        if (submitFence != VK_NULL_HANDLE) {
-            vkDestroyFence(device, submitFence, nullptr);
-        }
-        if (commandPool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(device, commandPool, nullptr);
-        }
-        vkDestroyDevice(device, nullptr);
-        device = VK_NULL_HANDLE;
+    if (!gpuDevice) return;
+    if (commands) {
+        gpu::discard_vulkan_commands(commands);
+        commands = nullptr;
     }
-    if (instance != VK_NULL_HANDLE) {
-        vkDestroyInstance(instance, nullptr);
-        instance = VK_NULL_HANDLE;
-    }
+    gpu::wait_idle(gpuDevice);
+    debugComputeArenas.reset();
+    batchComputeArenas.reset();
+    srgbToLinearLutBuffer.Reset();
+    gpu::destroy_pso(rgba8ToLinearShader);
+    gpu::destroy_pso(preprocessShader);
+    gpu::destroy_pso(stage0Shader);
+    gpu::destroy_pso(stage0ScoreShader);
+    gpu::destroy_pso(reduceSumShader);
+    gpu::destroy_pso(reduceAbsDeviationShader);
+    gpu::destroy_pso(downsampleShader);
+    gpu::destroy_pso(vulkanYuvToRgbaShader);
+    if (videoTextureHeap.owner) gpu::destroy_gpu_heap(videoTextureHeap);
+    if (videoSamplerHeap.owner) gpu::destroy_gpu_heap(videoSamplerHeap);
+    if (timestampQueryPool) vkDestroyQueryPool(device, timestampQueryPool, nullptr);
+    if (completion) gpu::destroy_timeline_semaphore(completion);
+    gpu::destroy_device(gpuDevice);
 }
 
 void BeginCommands(GpuSession& session) {
-    VkCheck(vkResetCommandBuffer(session.commandBuffer, 0), "vkResetCommandBuffer");
-    const VkCommandBufferBeginInfo beginInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-    VkCheck(vkBeginCommandBuffer(session.commandBuffer, &beginInfo), "vkBeginCommandBuffer");
-    if (session.timestampQueryEnabled) {
+    session.commands = gpu::begin_commands(session.gpuDevice);
+    session.commandBuffer = gpu::get_vulkan_commands(session.commands);
+    if (session.timestampQueryEnabled)
         vkCmdResetQueryPool(session.commandBuffer, session.timestampQueryPool, 0, 2);
-    }
 }
 
 void BeginTimestamp(GpuSession& session) {
@@ -931,172 +768,75 @@ void EndTimestamp(GpuSession& session) {
 void SubmitCommands(
     GpuSession& session,
     std::span<const VulkanVideoFrame* const> videoFrames = {}) {
-    VkCheck(vkEndCommandBuffer(session.commandBuffer), "vkEndCommandBuffer");
-    VkCheck(vkResetFences(session.device, 1, &session.submitFence), "vkResetFences");
-
-    std::array<VkSemaphore, 2> waitSemaphores{};
-    std::array<VkSemaphore, 2> signalSemaphores{};
-    std::array<std::uint64_t, 2> waitValues{};
-    std::array<std::uint64_t, 2> signalValues{};
-    std::array<VkPipelineStageFlags, 2> waitStages{};
-    std::uint32_t semaphoreCount = 0;
+    std::array<VkSemaphoreSubmitInfo, 2> waits{}, signals{};
+    std::array<AVVkFrame*, 2> owners{};
+    std::uint32_t count = 0;
     for (const VulkanVideoFrame* frame : videoFrames) {
-        if (frame == nullptr || frame->vkFrame == nullptr || frame->vkFrame->sem[0] == VK_NULL_HANDLE) {
-            continue;
-        }
+        if (!frame || !frame->vkFrame || !frame->vkFrame->sem[0]) continue;
         const VkSemaphore semaphore = frame->vkFrame->sem[0];
-        bool alreadyAdded = false;
-        for (std::uint32_t i = 0; i < semaphoreCount; ++i) {
-            alreadyAdded = alreadyAdded || waitSemaphores[i] == semaphore;
-        }
-        if (!alreadyAdded) {
-            if (semaphoreCount == waitSemaphores.size()) {
-                throw std::runtime_error("too many Vulkan Video synchronization semaphores");
-            }
-            waitSemaphores[semaphoreCount] = semaphore;
-            signalSemaphores[semaphoreCount] = semaphore;
-            waitValues[semaphoreCount] = frame->vkFrame->sem_value[0];
-            signalValues[semaphoreCount] = waitValues[semaphoreCount] + 1u;
-            waitStages[semaphoreCount] = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-            ++semaphoreCount;
-        }
+        bool duplicate = false;
+        for (std::uint32_t i = 0; i < count; ++i)
+            duplicate |= waits[i].semaphore == semaphore;
+        if (duplicate) continue;
+        if (count == waits.size()) throw std::runtime_error("too many video semaphores");
+        waits[count] = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+            .semaphore = semaphore,
+            .value = frame->vkFrame->sem_value[0],
+            .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        };
+        signals[count] = waits[count];
+        ++signals[count].value;
+        owners[count++] = frame->vkFrame;
     }
-    const VkTimelineSemaphoreSubmitInfo timelineInfo = {
-        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-        .waitSemaphoreValueCount = semaphoreCount,
-        .pWaitSemaphoreValues = waitValues.data(),
-        .signalSemaphoreValueCount = semaphoreCount,
-        .pSignalSemaphoreValues = signalValues.data(),
-    };
-    const VkSubmitInfo submitInfo = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext = semaphoreCount > 0 ? &timelineInfo : nullptr,
-        .waitSemaphoreCount = semaphoreCount,
-        .pWaitSemaphores = waitSemaphores.data(),
-        .pWaitDstStageMask = waitStages.data(),
-        .commandBufferCount = 1,
-        .pCommandBuffers = &session.commandBuffer,
-        .signalSemaphoreCount = semaphoreCount,
-        .pSignalSemaphores = signalSemaphores.data(),
-    };
-    VkCheck(vkQueueSubmit(session.queue, 1, &submitInfo, session.submitFence), "vkQueueSubmit");
-
-    for (const VulkanVideoFrame* frame : videoFrames) {
-        if (frame != nullptr && frame->vkFrame != nullptr && frame->vkFrame->sem[0] != VK_NULL_HANDLE) {
-            bool alreadyUpdated = false;
-            for (const VulkanVideoFrame* previous : videoFrames) {
-                if (previous == frame) {
-                    break;
-                }
-                if (previous != nullptr && previous->vkFrame != nullptr &&
-                    previous->vkFrame->sem[0] == frame->vkFrame->sem[0]) {
-                    alreadyUpdated = true;
-                    break;
-                }
-            }
-            if (!alreadyUpdated) {
-                frame->vkFrame->sem_value[0]++;
-            }
-        }
+    const gpu::TimelinePoint completion{session.completion, ++session.completionValue};
+    if (count) {
+        gpu::submit_vulkan({&session.commands, 1}, completion,
+                           {waits.data(), count}, {signals.data(), count});
+    } else {
+        gpu::submit({&session.commands, 1}, completion);
     }
+    session.commands = nullptr;
+    session.commandBuffer = VK_NULL_HANDLE;
+    for (std::uint32_t i = 0; i < count; ++i) ++owners[i]->sem_value[0];
 }
 
 void WaitForSubmission(GpuSession& session) {
-    VkCheck(
-        vkWaitForFences(session.device, 1, &session.submitFence, VK_TRUE, UINT64_MAX),
-        "vkWaitForFences");
+    gpu::wait_timeline({session.completion, session.completionValue});
 }
 
-void MemoryBarrier(
-    VkCommandBuffer commandBuffer,
-    VkPipelineStageFlags2 srcStage,
-    VkAccessFlags2 srcAccess,
-    VkPipelineStageFlags2 dstStage,
-    VkAccessFlags2 dstAccess) {
-    const VkMemoryBarrier2 barrier = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-        .srcStageMask = srcStage,
-        .srcAccessMask = srcAccess,
-        .dstStageMask = dstStage,
-        .dstAccessMask = dstAccess,
-    };
-    const VkDependencyInfo dependency = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .memoryBarrierCount = 1,
-        .pMemoryBarriers = &barrier,
-    };
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
-}
-
-void BindShader(GpuSession& session, const ComputeShader& shader) {
-    const VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    session.cmdBindShaders(session.commandBuffer, 1, &stage, &shader.shader);
-}
-
-void PushStorageDescriptors(
-    GpuSession& session,
-    const ComputeShader& shader,
-    std::span<const VkDescriptorBufferInfo> bufferInfos,
-    std::uint32_t firstBinding = 0) {
-    if (bufferInfos.size() > 8u) {
-        throw std::runtime_error("too many push descriptors");
-    }
-    std::array<VkWriteDescriptorSet, 8> writes{};
-    for (std::size_t i = 0; i < bufferInfos.size(); ++i) {
-        writes[i] = {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstBinding = firstBinding + static_cast<std::uint32_t>(i),
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .pBufferInfo = &bufferInfos[i],
-        };
-    }
-    session.cmdPushDescriptorSet(
-        session.commandBuffer,
-        VK_PIPELINE_BIND_POINT_COMPUTE,
-        shader.pipelineLayout,
-        0,
-        static_cast<std::uint32_t>(bufferInfos.size()),
-        writes.data());
-}
-
-void PushSampledImageDescriptors(
-    GpuSession& session,
-    const ComputeShader& shader,
-    std::span<const VkDescriptorImageInfo> imageInfos,
-    std::uint32_t firstBinding = 0) {
-    if (imageInfos.size() > 8u) {
-        throw std::runtime_error("too many image descriptors");
-    }
-    std::array<VkWriteDescriptorSet, 8> writes{};
-    for (std::size_t i = 0; i < imageInfos.size(); ++i) {
-        writes[i] = {
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstBinding = firstBinding + static_cast<std::uint32_t>(i),
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &imageInfos[i],
-        };
-    }
-    session.cmdPushDescriptorSet(
-        session.commandBuffer,
-        VK_PIPELINE_BIND_POINT_COMPUTE,
-        shader.pipelineLayout,
-        0,
-        static_cast<std::uint32_t>(imageInfos.size()),
-        writes.data());
+void SetBufferAddresses(GpuSession& session,
+                        std::span<const gpu::GpuRange> ranges,
+                        std::uint32_t firstBinding = 0) {
+    if (firstBinding + ranges.size() > std::size(session.root.buffers))
+        throw std::runtime_error("too many GPU addresses in compute root");
+    for (std::size_t i = 0; i < ranges.size(); ++i)
+        session.root.buffers[firstBinding + i] = static_cast<std::uint32_t*>(ranges[i].gpu);
 }
 
 template <typename Params>
-void PushParams(GpuSession& session, const ComputeShader& shader, const Params& params) {
-    static_assert(sizeof(Params) == 4u * sizeof(std::uint32_t));
-    vkCmdPushConstants(
-        session.commandBuffer,
-        shader.pipelineLayout,
-        VK_SHADER_STAGE_COMPUTE_BIT,
-        0,
-        sizeof(Params),
-        &params);
+void SetParams(GpuSession& session, const Params& params) {
+    static_assert(sizeof(Params) == sizeof(session.root.params));
+    std::memcpy(session.root.params, &params, sizeof(params));
+}
+
+struct MemoryCopy {
+    std::uint64_t srcOffset = 0;
+    std::uint64_t dstOffset = 0;
+    std::uint64_t size = 0;
+};
+
+void CopyRegions(GpuSession& session, const GpuBuffer& source, const GpuBuffer& destination,
+                 std::uint32_t count, const MemoryCopy* regions) {
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto& region = regions[i];
+        if (region.srcOffset > source.size || region.size > source.size - region.srcOffset ||
+            region.dstOffset > destination.size || region.size > destination.size - region.dstOffset)
+            throw std::runtime_error("GPU copy exceeds its allocation");
+        gpu::copy_memory(session.commands,
+            {reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(source.heap.range.gpu) + region.srcOffset), region.size},
+            {reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(destination.heap.range.gpu) + region.dstOffset), region.size});
+    }
 }
 
 double ReadGpuTimestampMs(GpuSession& session) {
@@ -1170,15 +910,15 @@ double SumAbsoluteDeviation(
 }
 
 struct BufferRegion {
-    VkDeviceSize offset = 0;
-    VkDeviceSize size = 0;
+    std::uint64_t offset = 0;
+    std::uint64_t size = 0;
 };
 
 struct ArenaBuilder {
-    VkDeviceSize cursor = 0;
-    VkDeviceSize alignment = 4;
+    std::uint64_t cursor = 0;
+    std::uint64_t alignment = 4;
 
-    BufferRegion Add(VkDeviceSize byteSize) {
+    BufferRegion Add(std::uint64_t byteSize) {
         cursor = AlignUp(cursor, alignment);
         const BufferRegion region = {.offset = cursor, .size = byteSize};
         cursor += byteSize;
@@ -1186,24 +926,17 @@ struct ArenaBuilder {
     }
 };
 
-VkDescriptorBufferInfo DescribeBuffer(
-    const VulkanBuffer& buffer,
-    const BufferRegion& region) {
+gpu::GpuRange DescribeBuffer(const GpuBuffer& buffer, const BufferRegion& region) {
+    if (region.offset > buffer.size || region.size > buffer.size - region.offset)
+        throw std::runtime_error("GPU address range exceeds its allocation");
     return {
-        .buffer = buffer.buffer,
-        .offset = region.offset,
-        .range = region.size,
+        .gpu = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(buffer.heap.range.gpu) + region.offset),
+        .size = region.size,
     };
 }
 
-void ValidateStorageRange(
-    const GpuSession& session,
-    VkDeviceSize byteSize,
-    const std::string_view label) {
-    if (byteSize > session.physicalDeviceProperties.limits.maxStorageBufferRange) {
-        throw std::runtime_error(
-            std::string(label) + " exceeds maxStorageBufferRange");
-    }
+void ValidateStorageRange(const GpuSession&, std::uint64_t byteSize, const std::string_view label) {
+    if (byteSize == 0) throw std::runtime_error(std::string(label) + " is empty");
 }
 
 std::array<std::uint32_t, 2> ComputeWorkgroupCounts(
@@ -1243,23 +976,23 @@ struct DebugStageLayout {
     BufferRegion readbackVar1;
     BufferRegion readbackVar2;
     BufferRegion readbackCov12;
-    VkDeviceSize workspaceBytes = 0;
-    VkDeviceSize uploadBytes = 0;
-    VkDeviceSize readbackBytes = 0;
+    std::uint64_t workspaceBytes = 0;
+    std::uint64_t uploadBytes = 0;
+    std::uint64_t readbackBytes = 0;
 };
 
 DebugStageLayout BuildDebugStageLayout(
     const GpuSession& session,
     std::size_t elemCount,
     bool includeStats) {
-    const VkDeviceSize rgbaBytes = elemCount * sizeof(LinearRgba);
-    const VkDeviceSize f32Bytes = elemCount * sizeof(float);
+    const std::uint64_t rgbaBytes = elemCount * sizeof(LinearRgba);
+    const std::uint64_t f32Bytes = elemCount * sizeof(float);
     ValidateStorageRange(session, rgbaBytes, "debug RGBA/LAB buffer");
     ValidateStorageRange(session, f32Bytes, "debug SSIM/statistics buffer");
     ArenaBuilder workspace{
-        .alignment = std::max<VkDeviceSize>(
+        .alignment = std::max<std::uint64_t>(
             4u,
-            session.physicalDeviceProperties.limits.minStorageBufferOffsetAlignment),
+            16u),
     };
     DebugStageLayout layout;
     layout.input1 = workspace.Add(rgbaBytes);
@@ -1316,48 +1049,42 @@ ScaleOutputs RunStage0Compute(
     }
     const DebugStageLayout layout =
         BuildDebugStageLayout(session, elemCount, readIntermediateStats);
-    const VkDeviceSize rgbaBytes = elemCount * sizeof(LinearRgba);
-    const VkDeviceSize f32Bytes = elemCount * sizeof(float);
+    const std::uint64_t rgbaBytes = elemCount * sizeof(LinearRgba);
+    const std::uint64_t f32Bytes = elemCount * sizeof(float);
 
     ScaleOutputs outputs;
-    if (!session.debugStage0Resources ||
-        session.debugStage0Resources->workspaceCapacity < layout.workspaceBytes ||
-        session.debugStage0Resources->uploadCapacity < layout.uploadBytes ||
-        session.debugStage0Resources->readbackCapacity < layout.readbackBytes) {
+    if (!session.debugComputeArenas ||
+        session.debugComputeArenas->workspaceCapacity < layout.workspaceBytes ||
+        session.debugComputeArenas->uploadCapacity < layout.uploadBytes ||
+        session.debugComputeArenas->readbackCapacity < layout.readbackBytes) {
         const auto startedAt = std::chrono::steady_clock::now();
-        auto resources = std::make_unique<Stage0Resources>();
+        auto resources = std::make_unique<ComputeArenas>();
         resources->workspaceCapacity = layout.workspaceBytes;
         resources->uploadCapacity = layout.uploadBytes;
         resources->readbackCapacity = layout.readbackBytes;
         resources->workspace = CreateBuffer(
             session,
             layout.workspaceBytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            gpu::MemoryType::gpu_only);
         resources->upload = CreateBuffer(
             session,
             layout.uploadBytes,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            gpu::MemoryType::cpu_visible);
         resources->readback = CreateBuffer(
             session,
             layout.readbackBytes,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-            VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        session.debugStage0Resources = std::move(resources);
+            gpu::MemoryType::readback);
+        session.debugComputeArenas = std::move(resources);
         outputs.createBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - startedAt);
     }
-    Stage0Resources& resources = *session.debugStage0Resources;
+    ComputeArenas& resources = *session.debugComputeArenas;
 
     const auto writeStartedAt = std::chrono::steady_clock::now();
     auto* uploadBytes = static_cast<std::uint8_t*>(resources.upload.mapped);
     std::memcpy(uploadBytes + layout.upload1.offset, input1.data(), rgbaBytes);
     std::memcpy(uploadBytes + layout.upload2.offset, input2.data(), rgbaBytes);
-    FlushMappedBuffer(resources.upload);
+
     outputs.writeInputBuffers_time = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - writeStartedAt);
 
@@ -1379,49 +1106,44 @@ ScaleOutputs RunStage0Compute(
 
     const auto dispatchStartedAt = std::chrono::steady_clock::now();
     BeginCommands(session);
-    const std::array<VkBufferCopy, 2> uploads = {{
+    const std::array<MemoryCopy, 2> uploads = {{
         {.srcOffset = layout.upload1.offset, .dstOffset = layout.input1.offset, .size = rgbaBytes},
         {.srcOffset = layout.upload2.offset, .dstOffset = layout.input2.offset, .size = rgbaBytes},
     }};
-    vkCmdCopyBuffer(
-        session.commandBuffer,
-        resources.upload.buffer,
-        resources.workspace.buffer,
+    CopyRegions(session, resources.upload, resources.workspace,
         static_cast<std::uint32_t>(uploads.size()),
         uploads.data());
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    gpu::barrier(session.commands,
+        gpu::Stage::transfer,
+        gpu::Access::transfer_write,
+        gpu::Stage::compute,
+        gpu::Access::shader_read);
     BeginTimestamp(session);
 
-    BindShader(session, session.preprocessShader);
-    const std::array<VkDescriptorBufferInfo, 2> preprocess1 = {{
+    gpu::bind_pso(session.commands, session.preprocessShader);
+    const std::array<gpu::GpuRange, 2> preprocess1 = {{
         DescribeBuffer(resources.workspace, layout.input1),
         DescribeBuffer(resources.workspace, layout.lab1),
     }};
-    PushStorageDescriptors(session, session.preprocessShader, preprocess1);
-    PushParams(session, session.preprocessShader, params);
-    vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
-    const std::array<VkDescriptorBufferInfo, 2> preprocess2 = {{
+    SetBufferAddresses(session, preprocess1);
+    SetParams(session, params);
+    gpu::dispatch(session.commands, session.root, {.x = wgX, .y = wgY, .z = 1});
+    const std::array<gpu::GpuRange, 2> preprocess2 = {{
         DescribeBuffer(resources.workspace, layout.input2),
         DescribeBuffer(resources.workspace, layout.lab2),
     }};
-    PushStorageDescriptors(session, session.preprocessShader, preprocess2);
-    PushParams(session, session.preprocessShader, params);
-    vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    SetBufferAddresses(session, preprocess2);
+    SetParams(session, params);
+    gpu::dispatch(session.commands, session.root, {.x = wgX, .y = wgY, .z = 1});
+    gpu::barrier(session.commands,
+        gpu::Stage::compute,
+        gpu::Access::shader_write,
+        gpu::Stage::compute,
+        gpu::Access::shader_read);
 
     if (readIntermediateStats) {
-        BindShader(session, session.stage0Shader);
-        const std::array<VkDescriptorBufferInfo, 8> descriptors = {{
+        gpu::bind_pso(session.commands, session.stage0Shader);
+        const std::array<gpu::GpuRange, 8> descriptors = {{
             DescribeBuffer(resources.workspace, layout.lab1),
             DescribeBuffer(resources.workspace, layout.lab2),
             DescribeBuffer(resources.workspace, layout.ssim),
@@ -1431,28 +1153,27 @@ ScaleOutputs RunStage0Compute(
             DescribeBuffer(resources.workspace, layout.var2),
             DescribeBuffer(resources.workspace, layout.cov12),
         }};
-        PushStorageDescriptors(session, session.stage0Shader, descriptors);
-        PushParams(session, session.stage0Shader, params);
+        SetBufferAddresses(session, descriptors);
+        SetParams(session, params);
     } else {
-        BindShader(session, session.stage0ScoreShader);
-        const std::array<VkDescriptorBufferInfo, 3> descriptors = {{
+        gpu::bind_pso(session.commands, session.stage0ScoreShader);
+        const std::array<gpu::GpuRange, 3> descriptors = {{
             DescribeBuffer(resources.workspace, layout.lab1),
             DescribeBuffer(resources.workspace, layout.lab2),
             DescribeBuffer(resources.workspace, layout.ssim),
         }};
-        PushStorageDescriptors(session, session.stage0ScoreShader, descriptors);
-        PushParams(session, session.stage0ScoreShader, params);
+        SetBufferAddresses(session, descriptors);
+        SetParams(session, params);
     }
-    vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
+    gpu::dispatch(session.commands, session.root, {.x = wgX, .y = wgY, .z = 1});
     EndTimestamp(session);
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT);
+    gpu::barrier(session.commands,
+        gpu::Stage::compute,
+        gpu::Access::shader_write,
+        gpu::Stage::transfer,
+        gpu::Access::transfer_read);
 
-    std::array<VkBufferCopy, 6> readbacks{};
+    std::array<MemoryCopy, 6> readbacks{};
     std::uint32_t readbackCount = 1;
     readbacks[0] = {
         .srcOffset = layout.ssim.offset,
@@ -1478,18 +1199,14 @@ ScaleOutputs RunStage0Compute(
         }
         readbackCount = static_cast<std::uint32_t>(readbacks.size());
     }
-    vkCmdCopyBuffer(
-        session.commandBuffer,
-        resources.workspace.buffer,
-        resources.readback.buffer,
+    CopyRegions(session, resources.workspace, resources.readback,
         readbackCount,
         readbacks.data());
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_HOST_BIT,
-        VK_ACCESS_2_HOST_READ_BIT);
+    gpu::barrier(session.commands,
+        gpu::Stage::transfer,
+        gpu::Access::transfer_write,
+        gpu::Stage::host,
+        gpu::Access::host_read);
     SubmitCommands(session);
     outputs.dispatchAndSubmit_time = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - dispatchStartedAt);
@@ -1499,7 +1216,7 @@ ScaleOutputs RunStage0Compute(
     outputs.elemCount = elemCount;
     const auto readbackStartedAt = std::chrono::steady_clock::now();
     WaitForSubmission(session);
-    InvalidateMappedBuffer(resources.readback);
+
     const auto* mapped = static_cast<const std::uint8_t*>(resources.readback.mapped);
     outputs.ssimMap.resize(elemCount);
     std::memcpy(outputs.ssimMap.data(), mapped + layout.readbackSsim.offset, f32Bytes);
@@ -1546,22 +1263,22 @@ struct BatchStageLayout {
     std::array<BufferRegion, kDefaultScaleWeights.size()> deviationSums;
     BufferRegion upload1;
     BufferRegion upload2;
-    VkDeviceSize workspaceBytes = 0;
-    VkDeviceSize uploadBytes = 0;
+    std::uint64_t workspaceBytes = 0;
+    std::uint64_t uploadBytes = 0;
 };
 
 BatchStageLayout BuildBatchStageLayout(
-    const GpuSession& session,
-    VkDeviceSize rgba8Bytes,
-    VkDeviceSize inputBytes,
-    VkDeviceSize downsampleBytes,
-    VkDeviceSize f32Bytes,
-    VkDeviceSize reductionScratchBytes,
+    const GpuSession&,
+    std::uint64_t rgba8Bytes,
+    std::uint64_t inputBytes,
+    std::uint64_t downsampleBytes,
+    std::uint64_t f32Bytes,
+    std::uint64_t reductionScratchBytes,
     std::size_t levelCount) {
     ArenaBuilder workspace{
-        .alignment = std::max<VkDeviceSize>(
+        .alignment = std::max<std::uint64_t>(
             4u,
-            session.physicalDeviceProperties.limits.minStorageBufferOffsetAlignment),
+            16u),
     };
     BatchStageLayout layout;
     layout.rgba8Input1 = workspace.Add(rgba8Bytes);
@@ -1589,91 +1306,100 @@ BatchStageLayout BuildBatchStageLayout(
 }
 
 struct VideoImageViews {
-    VkImageView y = VK_NULL_HANDLE;
-    VkImageView uv = VK_NULL_HANDLE;
+    std::uint32_t y = 0;
+    std::uint32_t uv = 0;
     VkImageLayout originalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkAccessFlags originalAccess = 0;
     std::uint32_t originalQueueFamily = VK_QUEUE_FAMILY_IGNORED;
-
-    VkDevice device = VK_NULL_HANDLE;
-    ~VideoImageViews() {
-        if (device != VK_NULL_HANDLE) {
-            if (y != VK_NULL_HANDLE) {
-                vkDestroyImageView(device, y, nullptr);
-            }
-            if (uv != VK_NULL_HANDLE) {
-                vkDestroyImageView(device, uv, nullptr);
-            }
-        }
-    }
-    VideoImageViews(const VideoImageViews&) = delete;
-    VideoImageViews& operator=(const VideoImageViews&) = delete;
-    VideoImageViews() = default;
-    VideoImageViews(VideoImageViews&& other) noexcept
-        : y(std::exchange(other.y, VK_NULL_HANDLE)),
-          uv(std::exchange(other.uv, VK_NULL_HANDLE)),
-          originalLayout(other.originalLayout),
-          originalAccess(other.originalAccess),
-          originalQueueFamily(other.originalQueueFamily),
-          device(std::exchange(other.device, VK_NULL_HANDLE)) {}
 };
 
-VkImageView CreateVideoPlaneView(
-    const GpuSession& session,
-    VkImage image,
-    VkFormat format,
-    VkImageAspectFlags aspect) {
-    const VkImageViewUsageCreateInfo viewUsage = {
+void WriteVideoPlaneDescriptor(const GpuSession& session, VkImage image,
+                              VkFormat format, VkImageAspectFlags aspect, std::uint32_t slot) {
+    const VkImageViewUsageCreateInfo usage{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
     };
-    const VkImageViewCreateInfo viewInfo = {
+    const VkImageViewCreateInfo view{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .pNext = &viewUsage,
+        .pNext = &usage,
         .image = image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D,
         .format = format,
-        .subresourceRange = {
-            .aspectMask = aspect,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
+        .subresourceRange = {.aspectMask = aspect, .levelCount = 1, .layerCount = 1},
     };
-    VkImageView view = VK_NULL_HANDLE;
-    VkCheck(vkCreateImageView(session.device, &viewInfo, nullptr, &view), "vkCreateImageView");
-    return view;
+    const VkImageDescriptorInfoEXT imageInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_DESCRIPTOR_INFO_EXT,
+        .pView = &view,
+        .layout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+    const VkResourceDescriptorInfoEXT descriptor{
+        .sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
+        .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+        .data = {.pImage = &imageInfo},
+    };
+    const auto stride = gpu::get_device_caps(session.gpuDevice).texture_descriptor_size;
+    const VkHostAddressRangeEXT destination{
+        .address = session.videoTextureHeap.range.cpu + slot * stride,
+        .size = static_cast<std::size_t>(stride),
+    };
+    VkCheck(session.writeResourceDescriptors(session.device, 1, &descriptor, &destination),
+            "vkWriteResourceDescriptorsEXT(video)");
 }
 
-VideoImageViews CreateVideoImageViews(
-    const GpuSession& session,
-    const VulkanVideoFrame& frame) {
-    if (frame.vkFrame == nullptr || frame.framesContext == nullptr) {
+VideoImageViews CreateVideoImageViews(const GpuSession& session, const VulkanVideoFrame& frame,
+                                     std::uint32_t firstSlot) {
+    if (!frame.vkFrame || !frame.framesContext)
         throw std::runtime_error("invalid Vulkan Video frame metadata");
-    }
+    if (frame.vkFrame->img[1] != VK_NULL_HANDLE)
+        throw std::runtime_error("separate-plane Vulkan Video frames are not supported");
     const bool tenBit = frame.softwareFormat == AV_PIX_FMT_P010LE ||
                         frame.softwareFormat == AV_PIX_FMT_P010BE;
-    const VkFormat planeFormat = tenBit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-    const VkFormat chromaFormat = tenBit ? VK_FORMAT_R16G16_UNORM : VK_FORMAT_R8G8_UNORM;
-
-    VideoImageViews views;
-    views.device = session.device;
-    views.originalLayout = frame.vkFrame->layout[0];
-    views.originalAccess = frame.vkFrame->access[0];
-    views.originalQueueFamily = frame.vkFrame->queue_family[0];
-
-    if (frame.vkFrame->img[1] != VK_NULL_HANDLE) {
-        views.y = CreateVideoPlaneView(session, frame.vkFrame->img[0], planeFormat, VK_IMAGE_ASPECT_COLOR_BIT);
-        views.uv = CreateVideoPlaneView(session, frame.vkFrame->img[1], chromaFormat, VK_IMAGE_ASPECT_COLOR_BIT);
-    } else {
-        views.y = CreateVideoPlaneView(
-            session, frame.vkFrame->img[0], planeFormat, VK_IMAGE_ASPECT_PLANE_0_BIT);
-        views.uv = CreateVideoPlaneView(
-            session, frame.vkFrame->img[0], chromaFormat, VK_IMAGE_ASPECT_PLANE_1_BIT);
-    }
+    VideoImageViews views{
+        .y = firstSlot,
+        .uv = firstSlot + 1,
+        .originalLayout = frame.vkFrame->layout[0],
+        .originalAccess = static_cast<VkAccessFlags>(frame.vkFrame->access[0]),
+        .originalQueueFamily = frame.vkFrame->queue_family[0],
+    };
+    WriteVideoPlaneDescriptor(session, frame.vkFrame->img[0],
+        tenBit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM, VK_IMAGE_ASPECT_PLANE_0_BIT, views.y);
+    WriteVideoPlaneDescriptor(session, frame.vkFrame->img[0],
+        tenBit ? VK_FORMAT_R16G16_UNORM : VK_FORMAT_R8G8_UNORM, VK_IMAGE_ASPECT_PLANE_1_BIT, views.uv);
     return views;
 }
+
+class VideoFrameLock {
+public:
+    explicit VideoFrameLock(const VulkanVideoFrame* frame) : frame_(frame) {
+        if (!frame_) return;
+        context_ = reinterpret_cast<AVVulkanFramesContext*>(frame_->framesContext->hwctx);
+        context_->lock_frame(frame_->framesContext, frame_->vkFrame);
+        layout_ = frame_->vkFrame->layout[0];
+        access_ = frame_->vkFrame->access[0];
+        queue_ = frame_->vkFrame->queue_family[0];
+    }
+    ~VideoFrameLock() {
+        if (!frame_) return;
+        frame_->vkFrame->layout[0] = layout_;
+        frame_->vkFrame->access[0] = access_;
+        frame_->vkFrame->queue_family[0] = queue_;
+        Unlock();
+    }
+    VideoFrameLock(const VideoFrameLock&) = delete;
+    VideoFrameLock& operator=(const VideoFrameLock&) = delete;
+    void Unlock() {
+        if (frame_) {
+            context_->unlock_frame(frame_->framesContext, frame_->vkFrame);
+            frame_ = nullptr;
+        }
+    }
+private:
+    const VulkanVideoFrame* frame_ = nullptr;
+    AVVulkanFramesContext* context_ = nullptr;
+    VkImageLayout layout_{};
+    VkAccessFlagBits access_{};
+    std::uint32_t queue_ = VK_QUEUE_FAMILY_IGNORED;
+};
 
 void RecordVideoImageBarrier(
     GpuSession& session,
@@ -1734,8 +1460,8 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         throw std::runtime_error("invalid batch dimensions");
     }
 
-    std::vector<VkDeviceSize> sumOutputOffsets(levelCount);
-    std::vector<VkDeviceSize> deviationOutputOffsets(levelCount);
+    std::vector<std::uint64_t> sumOutputOffsets(levelCount);
+    std::vector<std::uint64_t> deviationOutputOffsets(levelCount);
     std::vector<std::size_t> elemCounts(levelCount);
     for (std::size_t level = 0; level < levelCount; ++level) {
         const std::size_t elemCount =
@@ -1747,10 +1473,10 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         sumOutputOffsets[level] = level * 2u * sizeof(float);
         deviationOutputOffsets[level] = sumOutputOffsets[level] + sizeof(float);
     }
-    const VkDeviceSize outputBytesTotal = levelCount * 2u * sizeof(float);
+    const std::uint64_t outputBytesTotal = levelCount * 2u * sizeof(float);
 
     const std::size_t baseElemCount = elemCounts.front();
-    const VkDeviceSize rgba8Bytes = baseElemCount * 4u;
+    const std::uint64_t rgba8Bytes = baseElemCount * 4u;
     const bool videoInput = video1 != nullptr || video2 != nullptr;
     if (videoInput && (video1 == nullptr || video2 == nullptr)) {
         throw std::runtime_error("both video inputs must be Vulkan frames");
@@ -1761,14 +1487,14 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
           video2->width != widths.front() || video2->height != heights.front()))) {
         throw std::runtime_error("batch input dimensions do not match pixel count");
     }
-    const VkDeviceSize inputBytes = baseElemCount * sizeof(LinearRgba);
-    const VkDeviceSize downsampleBytes =
+    const std::uint64_t inputBytes = baseElemCount * sizeof(LinearRgba);
+    const std::uint64_t downsampleBytes =
         ((levelCount > 1u) ? elemCounts[1] : 1u) * sizeof(LinearRgba);
-    const VkDeviceSize baseF32Bytes = baseElemCount * sizeof(float);
+    const std::uint64_t baseF32Bytes = baseElemCount * sizeof(float);
     const auto baseWorkgroups =
         ComputeWorkgroupCounts(session, widths.front(), heights.front());
-    const VkDeviceSize reductionScratchBytes =
-        static_cast<VkDeviceSize>(baseWorkgroups[0]) * baseWorkgroups[1] * sizeof(float);
+    const std::uint64_t reductionScratchBytes =
+        static_cast<std::uint64_t>(baseWorkgroups[0]) * baseWorkgroups[1] * sizeof(float);
     ValidateStorageRange(session, rgba8Bytes, "packed RGBA8 input buffer");
     ValidateStorageRange(session, inputBytes, "linear RGBA/LAB buffer");
     ValidateStorageRange(session, downsampleBytes, "downsample buffer");
@@ -1784,46 +1510,40 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         levelCount);
 
     std::vector<ScaleOutputs> outputs(levelCount);
-    if (!session.batchStage0Resources ||
-        session.batchStage0Resources->workspaceCapacity < layout.workspaceBytes ||
-        session.batchStage0Resources->uploadCapacity < layout.uploadBytes ||
-        session.batchStage0Resources->readbackCapacity < outputBytesTotal) {
+    if (!session.batchComputeArenas ||
+        session.batchComputeArenas->workspaceCapacity < layout.workspaceBytes ||
+        session.batchComputeArenas->uploadCapacity < layout.uploadBytes ||
+        session.batchComputeArenas->readbackCapacity < outputBytesTotal) {
         const auto startedAt = std::chrono::steady_clock::now();
-        auto resources = std::make_unique<BatchStage0Resources>();
+        auto resources = std::make_unique<ComputeArenas>();
         resources->workspaceCapacity = layout.workspaceBytes;
         resources->uploadCapacity = layout.uploadBytes;
         resources->readbackCapacity = outputBytesTotal;
         resources->workspace = CreateBuffer(
             session,
             layout.workspaceBytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            gpu::MemoryType::gpu_only);
         resources->upload = CreateBuffer(
             session,
             layout.uploadBytes,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            gpu::MemoryType::cpu_visible);
         resources->readback = CreateBuffer(
             session,
             outputBytesTotal,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-            VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        session.batchStage0Resources = std::move(resources);
+            gpu::MemoryType::readback);
+        session.batchComputeArenas = std::move(resources);
         outputs.front().createBuffers_time =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - startedAt);
     }
-    BatchStage0Resources& resources = *session.batchStage0Resources;
+    ComputeArenas& resources = *session.batchComputeArenas;
 
     const auto writeStartedAt = std::chrono::steady_clock::now();
     if (!videoInput) {
         auto* upload = static_cast<std::uint8_t*>(resources.upload.mapped);
         std::memcpy(upload + layout.upload1.offset, input1.data(), rgba8Bytes);
         std::memcpy(upload + layout.upload2.offset, input2.data(), rgba8Bytes);
-        FlushMappedBuffer(resources.upload);
+
     }
     outputs.front().writeInputBuffers_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1846,16 +1566,14 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     std::unique_ptr<VideoImageViews> videoViews1;
     std::unique_ptr<VideoImageViews> videoViews2;
     if (videoInput) {
-        videoViews1 = std::make_unique<VideoImageViews>(CreateVideoImageViews(session, *video1));
-        videoViews2 = std::make_unique<VideoImageViews>(CreateVideoImageViews(session, *video2));
-        reinterpret_cast<AVVulkanFramesContext*>(video1->framesContext->hwctx)
-            ->lock_frame(video1->framesContext, video1->vkFrame);
-        reinterpret_cast<AVVulkanFramesContext*>(video2->framesContext->hwctx)
-            ->lock_frame(video2->framesContext, video2->vkFrame);
+        videoViews1 = std::make_unique<VideoImageViews>(CreateVideoImageViews(session, *video1, 0));
+        videoViews2 = std::make_unique<VideoImageViews>(CreateVideoImageViews(session, *video2, 2));
     }
+    VideoFrameLock lock1(videoInput ? video1 : nullptr);
+    VideoFrameLock lock2(videoInput ? video2 : nullptr);
     BeginCommands(session);
     if (!videoInput) {
-        const std::array<VkBufferCopy, 2> inputCopies = {{
+        const std::array<MemoryCopy, 2> inputCopies = {{
             {
                 .srcOffset = layout.upload1.offset,
                 .dstOffset = layout.rgba8Input1.offset,
@@ -1867,32 +1585,28 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
                 .size = rgba8Bytes,
             },
         }};
-        vkCmdCopyBuffer(
-            session.commandBuffer,
-            resources.upload.buffer,
-            resources.workspace.buffer,
+        CopyRegions(session, resources.upload, resources.workspace,
             static_cast<std::uint32_t>(inputCopies.size()),
             inputCopies.data());
-        MemoryBarrier(
-            session.commandBuffer,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        gpu::barrier(session.commands,
+            gpu::Stage::transfer,
+            gpu::Access::transfer_write,
+            gpu::Stage::compute,
+            gpu::Access::shader_read);
     } else {
         RecordVideoImageBarrier(
             session,
             *video1,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_ACCESS_2_SHADER_READ_BIT,
             session.queueFamilyIndex,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
         RecordVideoImageBarrier(
             session,
             *video2,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_ACCESS_2_SHADER_READ_BIT,
             session.queueFamilyIndex,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
@@ -1907,29 +1621,25 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
     };
     const std::uint32_t baseWgX = baseWorkgroups[0];
     const std::uint32_t baseWgY = baseWorkgroups[1];
-    const VkDescriptorBufferInfo lutDescriptor = {
-        .buffer = session.srgbToLinearLutBuffer.buffer,
-        .offset = 0,
-        .range = 256u * sizeof(float),
-    };
+    const gpu::GpuRange lutDescriptor = gpu::gpu_range(session.srgbToLinearLutBuffer.heap);
     if (!videoInput) {
-        BindShader(session, session.rgba8ToLinearShader);
-        const std::array<VkDescriptorBufferInfo, 3> convert1 = {{
+        gpu::bind_pso(session.commands, session.rgba8ToLinearShader);
+        const std::array<gpu::GpuRange, 3> convert1 = {{
             DescribeBuffer(resources.workspace, layout.rgba8Input1),
             DescribeBuffer(resources.workspace, layout.input1),
             lutDescriptor,
         }};
-        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert1);
-        PushParams(session, session.rgba8ToLinearShader, baseParams);
-        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
-        const std::array<VkDescriptorBufferInfo, 3> convert2 = {{
+        SetBufferAddresses(session, convert1);
+        SetParams(session, baseParams);
+        gpu::dispatch(session.commands, session.root, {.x = baseWgX, .y = baseWgY, .z = 1});
+        const std::array<gpu::GpuRange, 3> convert2 = {{
             DescribeBuffer(resources.workspace, layout.rgba8Input2),
             DescribeBuffer(resources.workspace, layout.input2),
             lutDescriptor,
         }};
-        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert2);
-        PushParams(session, session.rgba8ToLinearShader, baseParams);
-        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+        SetBufferAddresses(session, convert2);
+        SetParams(session, baseParams);
+        gpu::dispatch(session.commands, session.root, {.x = baseWgX, .y = baseWgY, .z = 1});
     } else {
         const struct YuvParams {
             std::uint32_t width;
@@ -1947,25 +1657,21 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             .fullRange = (video1->colorRange == AVCOL_RANGE_JPEG ||
                           video2->colorRange == AVCOL_RANGE_JPEG) ? 1u : 0u,
         };
-        BindShader(session, session.vulkanYuvToRgbaShader);
-        const std::array<VkDescriptorImageInfo, 2> images1 = {{
-            {.sampler = session.videoYSampler, .imageView = videoViews1->y, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-            {.sampler = session.videoUvSampler, .imageView = videoViews1->uv, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        }};
-        PushSampledImageDescriptors(session, session.vulkanYuvToRgbaShader, images1);
-        const VkDescriptorBufferInfo output1 = DescribeBuffer(resources.workspace, layout.rgba8Input1);
-        PushStorageDescriptors(session, session.vulkanYuvToRgbaShader, std::span(&output1, 1), 2);
-        PushParams(session, session.vulkanYuvToRgbaShader, yuvParams);
-        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
-        const std::array<VkDescriptorImageInfo, 2> images2 = {{
-            {.sampler = session.videoYSampler, .imageView = videoViews2->y, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-            {.sampler = session.videoUvSampler, .imageView = videoViews2->uv, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        }};
-        PushSampledImageDescriptors(session, session.vulkanYuvToRgbaShader, images2);
-        const VkDescriptorBufferInfo output2 = DescribeBuffer(resources.workspace, layout.rgba8Input2);
-        PushStorageDescriptors(session, session.vulkanYuvToRgbaShader, std::span(&output2, 1), 2);
-        PushParams(session, session.vulkanYuvToRgbaShader, yuvParams);
-        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+        gpu::set_texture_descriptor_heap(session.commands, gpu::gpu_range(session.videoTextureHeap));
+        gpu::set_sampler_descriptor_heap(session.commands, gpu::gpu_range(session.videoSamplerHeap));
+        gpu::bind_pso(session.commands, session.vulkanYuvToRgbaShader);
+        session.root.yIndex = videoViews1->y;
+        session.root.uvIndex = videoViews1->uv;
+        const gpu::GpuRange output1 = DescribeBuffer(resources.workspace, layout.rgba8Input1);
+        SetBufferAddresses(session, std::span(&output1, 1), 2);
+        SetParams(session, yuvParams);
+        gpu::dispatch(session.commands, session.root, {.x = baseWgX, .y = baseWgY, .z = 1});
+        session.root.yIndex = videoViews2->y;
+        session.root.uvIndex = videoViews2->uv;
+        const gpu::GpuRange output2 = DescribeBuffer(resources.workspace, layout.rgba8Input2);
+        SetBufferAddresses(session, std::span(&output2, 1), 2);
+        SetParams(session, yuvParams);
+        gpu::dispatch(session.commands, session.root, {.x = baseWgX, .y = baseWgY, .z = 1});
         RecordVideoImageBarrier(
             session, *video1, videoViews1->originalLayout,
             static_cast<VkAccessFlags2>(videoViews1->originalAccess),
@@ -1979,32 +1685,33 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
 
+        gpu::barrier(session.commands, gpu::Stage::compute, gpu::Access::shader_write,
+                     gpu::Stage::compute, gpu::Access::shader_read);
         // Keep the same packed-RGBA8 -> linear-premultiplied path as still
         // images. The YUV conversion above only replaces the CPU upload.
-        BindShader(session, session.rgba8ToLinearShader);
-        const std::array<VkDescriptorBufferInfo, 3> convert1 = {{
+        gpu::bind_pso(session.commands, session.rgba8ToLinearShader);
+        const std::array<gpu::GpuRange, 3> convert1 = {{
             DescribeBuffer(resources.workspace, layout.rgba8Input1),
             DescribeBuffer(resources.workspace, layout.input1),
             lutDescriptor,
         }};
-        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert1);
-        PushParams(session, session.rgba8ToLinearShader, baseParams);
-        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
-        const std::array<VkDescriptorBufferInfo, 3> convert2 = {{
+        SetBufferAddresses(session, convert1);
+        SetParams(session, baseParams);
+        gpu::dispatch(session.commands, session.root, {.x = baseWgX, .y = baseWgY, .z = 1});
+        const std::array<gpu::GpuRange, 3> convert2 = {{
             DescribeBuffer(resources.workspace, layout.rgba8Input2),
             DescribeBuffer(resources.workspace, layout.input2),
             lutDescriptor,
         }};
-        PushStorageDescriptors(session, session.rgba8ToLinearShader, convert2);
-        PushParams(session, session.rgba8ToLinearShader, baseParams);
-        vkCmdDispatch(session.commandBuffer, baseWgX, baseWgY, 1);
+        SetBufferAddresses(session, convert2);
+        SetParams(session, baseParams);
+        gpu::dispatch(session.commands, session.root, {.x = baseWgX, .y = baseWgY, .z = 1});
     }
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    gpu::barrier(session.commands,
+        gpu::Stage::compute,
+        gpu::Access::shader_write,
+        gpu::Stage::compute,
+        gpu::Access::shader_read);
 
     const auto recordSumReduction = [&](BufferRegion inputRegion,
                                         std::uint32_t inputWidth,
@@ -2018,8 +1725,8 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             const std::uint32_t reductionWgX = reductionWorkgroups[0];
             const std::uint32_t reductionWgY = reductionWorkgroups[1];
             const bool finalPass = reductionWgX == 1u && reductionWgY == 1u;
-            const VkDeviceSize partialBytes =
-                static_cast<VkDeviceSize>(reductionWgX) * reductionWgY * sizeof(float);
+            const std::uint64_t partialBytes =
+                static_cast<std::uint64_t>(reductionWgX) * reductionWgY * sizeof(float);
             const BufferRegion outputRegion = finalPass
                                                   ? finalOutput
                                                   : BufferRegion{
@@ -2033,20 +1740,19 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
                 .height = inputHeight,
                 .qscale = 0u,
             };
-            BindShader(session, session.reduceSumShader);
-            const std::array<VkDescriptorBufferInfo, 2> descriptors = {{
+            gpu::bind_pso(session.commands, session.reduceSumShader);
+            const std::array<gpu::GpuRange, 2> descriptors = {{
                 DescribeBuffer(resources.workspace, inputRegion),
                 DescribeBuffer(resources.workspace, outputRegion),
             }};
-            PushStorageDescriptors(session, session.reduceSumShader, descriptors);
-            PushParams(session, session.reduceSumShader, reductionParams);
-            vkCmdDispatch(session.commandBuffer, reductionWgX, reductionWgY, 1);
-            MemoryBarrier(
-                session.commandBuffer,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            SetBufferAddresses(session, descriptors);
+            SetParams(session, reductionParams);
+            gpu::dispatch(session.commands, session.root, {.x = reductionWgX, .y = reductionWgY, .z = 1});
+            gpu::barrier(session.commands,
+                gpu::Stage::compute,
+                gpu::Access::shader_write,
+                gpu::Stage::compute,
+                gpu::Access::shader_read);
             if (finalPass) {
                 break;
             }
@@ -2067,8 +1773,8 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         const std::uint32_t wgX = workgroups[0];
         const std::uint32_t wgY = workgroups[1];
         const bool finalPass = wgX == 1u && wgY == 1u;
-        const VkDeviceSize partialBytes =
-            static_cast<VkDeviceSize>(wgX) * wgY * sizeof(float);
+        const std::uint64_t partialBytes =
+            static_cast<std::uint64_t>(wgX) * wgY * sizeof(float);
         const BufferRegion outputRegion = finalPass
                                               ? deviationResult
                                               : BufferRegion{
@@ -2080,29 +1786,28 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             .height = height,
             .qscale = level,
         };
-        BindShader(session, session.reduceAbsDeviationShader);
-        const std::array<VkDescriptorBufferInfo, 3> descriptors = {{
+        gpu::bind_pso(session.commands, session.reduceAbsDeviationShader);
+        const std::array<gpu::GpuRange, 3> descriptors = {{
             DescribeBuffer(resources.workspace, ssimRegion),
             DescribeBuffer(resources.workspace, sumResult),
             DescribeBuffer(resources.workspace, outputRegion),
         }};
-        PushStorageDescriptors(session, session.reduceAbsDeviationShader, descriptors);
-        PushParams(session, session.reduceAbsDeviationShader, deviationParams);
-        vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
-        MemoryBarrier(
-            session.commandBuffer,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        SetBufferAddresses(session, descriptors);
+        SetParams(session, deviationParams);
+        gpu::dispatch(session.commands, session.root, {.x = wgX, .y = wgY, .z = 1});
+        gpu::barrier(session.commands,
+            gpu::Stage::compute,
+            gpu::Access::shader_write,
+            gpu::Stage::compute,
+            gpu::Access::shader_read);
         if (!finalPass) {
             recordSumReduction(outputRegion, wgX, wgY, deviationResult);
         }
     };
 
     for (std::size_t level = 0; level < levelCount; ++level) {
-        const VkDeviceSize rgbaBytes = elemCounts[level] * sizeof(LinearRgba);
-        const VkDeviceSize f32Bytes = elemCounts[level] * sizeof(float);
+        const std::uint64_t rgbaBytes = elemCounts[level] * sizeof(LinearRgba);
+        const std::uint64_t f32Bytes = elemCounts[level] * sizeof(float);
         const BufferRegion currentInput1 = ((level & 1u) == 0u)
                                                ? BufferRegion{layout.input1.offset, rgbaBytes}
                                                : BufferRegion{layout.downsample1.offset, rgbaBytes};
@@ -2123,43 +1828,41 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
         const std::uint32_t wgX = workgroups[0];
         const std::uint32_t wgY = workgroups[1];
 
-        BindShader(session, session.preprocessShader);
-        const std::array<VkDescriptorBufferInfo, 2> preprocess1 = {{
+        gpu::bind_pso(session.commands, session.preprocessShader);
+        const std::array<gpu::GpuRange, 2> preprocess1 = {{
             DescribeBuffer(resources.workspace, currentInput1),
             DescribeBuffer(resources.workspace, currentLab1),
         }};
-        PushStorageDescriptors(session, session.preprocessShader, preprocess1);
-        PushParams(session, session.preprocessShader, params);
-        vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
-        const std::array<VkDescriptorBufferInfo, 2> preprocess2 = {{
+        SetBufferAddresses(session, preprocess1);
+        SetParams(session, params);
+        gpu::dispatch(session.commands, session.root, {.x = wgX, .y = wgY, .z = 1});
+        const std::array<gpu::GpuRange, 2> preprocess2 = {{
             DescribeBuffer(resources.workspace, currentInput2),
             DescribeBuffer(resources.workspace, currentLab2),
         }};
-        PushStorageDescriptors(session, session.preprocessShader, preprocess2);
-        PushParams(session, session.preprocessShader, params);
-        vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
-        MemoryBarrier(
-            session.commandBuffer,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        SetBufferAddresses(session, preprocess2);
+        SetParams(session, params);
+        gpu::dispatch(session.commands, session.root, {.x = wgX, .y = wgY, .z = 1});
+        gpu::barrier(session.commands,
+            gpu::Stage::compute,
+            gpu::Access::shader_write,
+            gpu::Stage::compute,
+            gpu::Access::shader_read);
 
-        BindShader(session, session.stage0ScoreShader);
-        const std::array<VkDescriptorBufferInfo, 3> scoreDescriptors = {{
+        gpu::bind_pso(session.commands, session.stage0ScoreShader);
+        const std::array<gpu::GpuRange, 3> scoreDescriptors = {{
             DescribeBuffer(resources.workspace, currentLab1),
             DescribeBuffer(resources.workspace, currentLab2),
             DescribeBuffer(resources.workspace, currentSsim),
         }};
-        PushStorageDescriptors(session, session.stage0ScoreShader, scoreDescriptors);
-        PushParams(session, session.stage0ScoreShader, params);
-        vkCmdDispatch(session.commandBuffer, wgX, wgY, 1);
-        MemoryBarrier(
-            session.commandBuffer,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        SetBufferAddresses(session, scoreDescriptors);
+        SetParams(session, params);
+        gpu::dispatch(session.commands, session.root, {.x = wgX, .y = wgY, .z = 1});
+        gpu::barrier(session.commands,
+            gpu::Stage::compute,
+            gpu::Access::shader_write,
+            gpu::Stage::compute,
+            gpu::Access::shader_read);
         recordSumReduction(
             currentSsim,
             widths[level],
@@ -2174,7 +1877,7 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             layout.deviationSums[level]);
 
         if (level + 1u < levelCount) {
-            const VkDeviceSize nextRgbaBytes = elemCounts[level + 1u] * sizeof(LinearRgba);
+            const std::uint64_t nextRgbaBytes = elemCounts[level + 1u] * sizeof(LinearRgba);
             const BufferRegion nextInput1 = ((level & 1u) == 0u)
                                                 ? BufferRegion{layout.downsample1.offset, nextRgbaBytes}
                                                 : BufferRegion{layout.input1.offset, nextRgbaBytes};
@@ -2191,39 +1894,37 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
                 session, widths[level + 1u], heights[level + 1u]);
             const std::uint32_t downsampleWgX = downsampleWorkgroups[0];
             const std::uint32_t downsampleWgY = downsampleWorkgroups[1];
-            BindShader(session, session.downsampleShader);
-            const std::array<VkDescriptorBufferInfo, 2> downsample1 = {{
+            gpu::bind_pso(session.commands, session.downsampleShader);
+            const std::array<gpu::GpuRange, 2> downsample1 = {{
                 DescribeBuffer(resources.workspace, currentInput1),
                 DescribeBuffer(resources.workspace, nextInput1),
             }};
-            PushStorageDescriptors(session, session.downsampleShader, downsample1);
-            PushParams(session, session.downsampleShader, downsampleParams);
-            vkCmdDispatch(session.commandBuffer, downsampleWgX, downsampleWgY, 1);
-            const std::array<VkDescriptorBufferInfo, 2> downsample2 = {{
+            SetBufferAddresses(session, downsample1);
+            SetParams(session, downsampleParams);
+            gpu::dispatch(session.commands, session.root, {.x = downsampleWgX, .y = downsampleWgY, .z = 1});
+            const std::array<gpu::GpuRange, 2> downsample2 = {{
                 DescribeBuffer(resources.workspace, currentInput2),
                 DescribeBuffer(resources.workspace, nextInput2),
             }};
-            PushStorageDescriptors(session, session.downsampleShader, downsample2);
-            PushParams(session, session.downsampleShader, downsampleParams);
-            vkCmdDispatch(session.commandBuffer, downsampleWgX, downsampleWgY, 1);
-            MemoryBarrier(
-                session.commandBuffer,
-                VK_PIPELINE_STAGE_2_TRANSFER_BIT |
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            SetBufferAddresses(session, downsample2);
+            SetParams(session, downsampleParams);
+            gpu::dispatch(session.commands, session.root, {.x = downsampleWgX, .y = downsampleWgY, .z = 1});
+            gpu::barrier(session.commands,
+                gpu::Stage::transfer |
+                    gpu::Stage::compute,
+                gpu::Access::transfer_read | gpu::Access::shader_write,
+                gpu::Stage::compute,
+                gpu::Access::shader_read | gpu::Access::shader_write);
         }
     }
 
     EndTimestamp(session);
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT);
-    std::array<VkBufferCopy, kDefaultScaleWeights.size() * 2u> resultCopies{};
+    gpu::barrier(session.commands,
+        gpu::Stage::compute,
+        gpu::Access::shader_write,
+        gpu::Stage::transfer,
+        gpu::Access::transfer_read);
+    std::array<MemoryCopy, kDefaultScaleWeights.size() * 2u> resultCopies{};
     std::uint32_t resultCopyCount = 0;
     for (std::size_t level = 0; level < levelCount; ++level) {
         resultCopies[resultCopyCount++] = {
@@ -2237,36 +1938,28 @@ std::vector<ScaleOutputs> RunStage0BatchCompute(
             .size = sizeof(float),
         };
     }
-    vkCmdCopyBuffer(
-        session.commandBuffer,
-        resources.workspace.buffer,
-        resources.readback.buffer,
+    CopyRegions(session, resources.workspace, resources.readback,
         resultCopyCount,
         resultCopies.data());
-    MemoryBarrier(
-        session.commandBuffer,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_HOST_BIT,
-        VK_ACCESS_2_HOST_READ_BIT);
+    gpu::barrier(session.commands,
+        gpu::Stage::transfer,
+        gpu::Access::transfer_write,
+        gpu::Stage::host,
+        gpu::Access::host_read);
     const std::array<const VulkanVideoFrame*, 2> submittedVideoFrames = {video1, video2};
     SubmitCommands(
         session,
         videoInput ? std::span<const VulkanVideoFrame* const>(submittedVideoFrames) :
                       std::span<const VulkanVideoFrame* const>());
-    if (videoInput) {
-        reinterpret_cast<AVVulkanFramesContext*>(video1->framesContext->hwctx)
-            ->unlock_frame(video1->framesContext, video1->vkFrame);
-        reinterpret_cast<AVVulkanFramesContext*>(video2->framesContext->hwctx)
-            ->unlock_frame(video2->framesContext, video2->vkFrame);
-    }
+    lock1.Unlock();
+    lock2.Unlock();
     outputs.front().dispatchAndSubmit_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - dispatchStartedAt);
 
     const auto readbackStartedAt = std::chrono::steady_clock::now();
     WaitForSubmission(session);
-    InvalidateMappedBuffer(resources.readback);
+
     const auto* reductionBytes =
         static_cast<const std::uint8_t*>(resources.readback.mapped);
     outputs.front().gpuTimestampMs = ReadGpuTimestampMs(session);
@@ -2372,272 +2065,86 @@ bool HasDeviceExtension(VkPhysicalDevice physicalDevice, const char* extensionNa
         });
 }
 
-struct PhysicalDeviceSelection {
-    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-    std::uint32_t queueFamilyIndex = 0;
-    VkQueueFamilyProperties queueFamilyProperties{};
-    std::uint32_t videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    VkQueueFamilyProperties videoDecodeQueueProperties{};
-    VkVideoCodecOperationFlagsKHR videoDecodeCaps = 0;
-    std::uint32_t videoDecodeQueueFamilyIndexSecondary = VK_QUEUE_FAMILY_IGNORED;
-    VkQueueFamilyProperties videoDecodeQueuePropertiesSecondary{};
-    VkVideoCodecOperationFlagsKHR videoDecodeCapsSecondary = 0;
-    VkPhysicalDeviceProperties properties{};
+struct VideoDeviceConfig {
+    GpuSession& session;
+    std::vector<VkDeviceQueueCreateInfo> queues;
+    float priority = 1.0f;
+    VkPhysicalDeviceVideoMaintenance1FeaturesKHR maintenance{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_MAINTENANCE_1_FEATURES_KHR,
+    };
 };
 
-PhysicalDeviceSelection SelectPhysicalDevice(VkInstance instance) {
-    std::uint32_t deviceCount = 0;
-    VkCheck(
-        vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr),
-        "vkEnumeratePhysicalDevices(count)");
-    if (deviceCount == 0) {
-        throw std::runtime_error("no Vulkan physical device found");
+VkResult ConfigureVideoDevice(void* context, VkPhysicalDevice physical, VkDeviceCreateInfo& info) {
+    auto& config = *static_cast<VideoDeviceConfig*>(context);
+    auto& session = config.session;
+    config.queues.assign(info.pQueueCreateInfos, info.pQueueCreateInfos + info.queueCreateInfoCount);
+    session.videoDeviceExtensions.assign(info.ppEnabledExtensionNames, info.ppEnabledExtensionNames + info.enabledExtensionCount);
+    session.physicalDevice = physical;
+    session.queueFamilyIndex = config.queues.front().queueFamilyIndex;
+    std::uint32_t queueCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties2(physical, &queueCount, nullptr);
+    std::vector<VkQueueFamilyProperties2> queues(queueCount);
+    std::vector<VkQueueFamilyVideoPropertiesKHR> video(queueCount);
+    for (std::uint32_t i = 0; i < queueCount; ++i) {
+        queues[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+        video[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR;
+        queues[i].pNext = &video[i];
     }
-    std::vector<VkPhysicalDevice> devices(deviceCount);
-    VkCheck(
-        vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data()),
-        "vkEnumeratePhysicalDevices");
-
-    PhysicalDeviceSelection best;
-    int bestScore = std::numeric_limits<int>::min();
-    for (VkPhysicalDevice physicalDevice : devices) {
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(physicalDevice, &properties);
-        if (VK_API_VERSION_MAJOR(properties.apiVersion) < 1u ||
-            (VK_API_VERSION_MAJOR(properties.apiVersion) == 1u &&
-             VK_API_VERSION_MINOR(properties.apiVersion) < 3u)) {
-            continue;
-        }
-        const VkPhysicalDeviceLimits& limits = properties.limits;
-        if (limits.maxComputeWorkGroupInvocations < 16u * 16u ||
-            limits.maxComputeWorkGroupSize[0] < 16u ||
-            limits.maxComputeWorkGroupSize[1] < 16u ||
-            limits.maxComputeSharedMemorySize < 20u * 20u * 4u * sizeof(float) ||
-            limits.maxPerStageDescriptorStorageBuffers < 8u) {
-            continue;
-        }
-        if (!HasDeviceExtension(physicalDevice, VK_EXT_SHADER_OBJECT_EXTENSION_NAME) ||
-            !HasDeviceExtension(physicalDevice, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
-            continue;
-        }
-        const bool hasVideoDecodeExtensions =
-            HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) &&
-            HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) &&
-            (HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME) ||
-             HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME) ||
-             HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME) ||
-             HasDeviceExtension(physicalDevice, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME));
-
-        VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{};
-        shaderObjectFeatures.sType =
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT;
-        VkPhysicalDeviceVulkan13Features vulkan13Features{};
-        vulkan13Features.sType =
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-        vulkan13Features.pNext = &shaderObjectFeatures;
-        VkPhysicalDeviceVulkan12Features vulkan12Features{};
-        vulkan12Features.sType =
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-        vulkan12Features.pNext = &vulkan13Features;
-        VkPhysicalDeviceFeatures2 features{};
-        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features.pNext = &vulkan12Features;
-        vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
-        if (shaderObjectFeatures.shaderObject != VK_TRUE ||
-            vulkan12Features.timelineSemaphore != VK_TRUE ||
-            vulkan13Features.synchronization2 != VK_TRUE ||
-            vulkan13Features.dynamicRendering != VK_TRUE) {
-            continue;
-        }
-
-        std::uint32_t queueCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(
-            physicalDevice, &queueCount, nullptr);
-        std::vector<VkQueueFamilyProperties> queues(queueCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(
-            physicalDevice, &queueCount, queues.data());
-        std::uint32_t videoQueueIndex = VK_QUEUE_FAMILY_IGNORED;
-        VkQueueFamilyProperties videoQueueProperties{};
-        for (std::uint32_t queueIndex = 0; queueIndex < queueCount; ++queueIndex) {
-            const VkQueueFamilyProperties& queue = queues[queueIndex];
-            if (queue.queueCount == 0) {
-                continue;
+    vkGetPhysicalDeviceQueueFamilyProperties2(physical, &queueCount, queues.data());
+    const auto& compute = queues[session.queueFamilyIndex].queueFamilyProperties;
+    session.computeQueueFlags = compute.queueFlags;
+    session.timestampValidBits = compute.timestampValidBits;
+    VkVideoCodecOperationFlagsKHR supported = 0;
+    if (HasDeviceExtension(physical, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) &&
+        HasDeviceExtension(physical, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME)) {
+        const std::array<std::pair<const char*, VkVideoCodecOperationFlagsKHR>, 4> codecs{{
+            {VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME, VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR},
+            {VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME, VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR},
+            {VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME, VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR},
+            {VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME, VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR},
+        }};
+        for (const auto& [extension, capability] : codecs)
+            if (HasDeviceExtension(physical, extension)) {
+                supported |= capability;
+                session.videoDeviceExtensions.push_back(extension);
             }
-            if (hasVideoDecodeExtensions &&
-                (queue.queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) != 0 &&
-                videoQueueIndex == VK_QUEUE_FAMILY_IGNORED) {
-                videoQueueIndex = queueIndex;
-                videoQueueProperties = queue;
-            }
-            if ((queue.queueFlags & VK_QUEUE_COMPUTE_BIT) == 0) {
-                continue;
-            }
-            int score = 0;
-            if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-                score += 1000;
-            } else if (properties.deviceType ==
-                       VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
-                score += 500;
-            }
-            if ((queue.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
-                score += 100;
-            }
-            if (score > bestScore) {
-                bestScore = score;
-                best = {
-                    .physicalDevice = physicalDevice,
-                    .queueFamilyIndex = queueIndex,
-                    .queueFamilyProperties = queue,
-                    .videoDecodeQueueFamilyIndex = videoQueueIndex,
-                    .videoDecodeQueueProperties = videoQueueProperties,
-                    .properties = properties,
-                };
-            }
+        session.videoDeviceExtensions.push_back(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
+        session.videoDeviceExtensions.push_back(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME);
+    }
+    for (std::uint32_t i = 0; i < queueCount; ++i) {
+        const auto& q = queues[i].queueFamilyProperties;
+        const auto caps = video[i].videoCodecOperations & supported;
+        if (!q.queueCount || !(q.queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) || !caps) continue;
+        if (session.videoDecodeQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED) {
+            session.videoDecodeQueueFamilyIndex = i;
+            session.videoDecodeQueueFlags = q.queueFlags;
+            session.videoDecodeCaps = caps;
+        } else if (session.videoDecodeQueueFamilyIndexSecondary == VK_QUEUE_FAMILY_IGNORED) {
+            session.videoDecodeQueueFamilyIndexSecondary = i;
+            session.videoDecodeQueueFlagsSecondary = q.queueFlags;
+            session.videoDecodeCapsSecondary = caps;
+        } else break;
+        if (i != session.queueFamilyIndex)
+            config.queues.push_back({
+                .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                .queueFamilyIndex = i, .queueCount = 1, .pQueuePriorities = &config.priority,
+            });
+    }
+    session.videoSupported = session.videoDecodeCaps != 0;
+    if (session.videoSupported && HasDeviceExtension(physical, VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &config.maintenance};
+        vkGetPhysicalDeviceFeatures2(physical, &features);
+        if (config.maintenance.videoMaintenance1) {
+            session.videoDeviceExtensions.push_back(VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME);
+            config.maintenance.pNext = const_cast<void*>(info.pNext);
+            info.pNext = &config.maintenance;
         }
     }
-    if (best.physicalDevice == VK_NULL_HANDLE) {
-        throw std::runtime_error(
-            "no Vulkan 1.3 compute device supports VK_EXT_shader_object, "
-            "VK_KHR_push_descriptor, synchronization2, dynamic rendering, "
-            "and the required compute shader limits");
-    }
-    if (HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_QUEUE_EXTENSION_NAME) &&
-        HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) &&
-        (HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME) ||
-         HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME) ||
-         HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME) ||
-         HasDeviceExtension(best.physicalDevice, VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME))) {
-        std::uint32_t queueCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties2(best.physicalDevice, &queueCount, nullptr);
-        std::vector<VkQueueFamilyProperties2> queues(queueCount);
-        std::vector<VkQueueFamilyVideoPropertiesKHR> videoProperties(queueCount);
-        for (std::uint32_t queueIndex = 0; queueIndex < queueCount; ++queueIndex) {
-            queues[queueIndex].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
-            videoProperties[queueIndex].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR;
-            queues[queueIndex].pNext = &videoProperties[queueIndex];
-        }
-        vkGetPhysicalDeviceQueueFamilyProperties2(
-            best.physicalDevice,
-            &queueCount,
-            queues.data());
-        best.videoDecodeQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        best.videoDecodeQueueFamilyIndexSecondary = VK_QUEUE_FAMILY_IGNORED;
-        for (std::uint32_t queueIndex = 0; queueIndex < queueCount; ++queueIndex) {
-            if (queues[queueIndex].queueFamilyProperties.queueCount == 0 ||
-                (queues[queueIndex].queueFamilyProperties.queueFlags &
-                 VK_QUEUE_VIDEO_DECODE_BIT_KHR) == 0 ||
-                videoProperties[queueIndex].videoCodecOperations == 0) {
-                continue;
-            }
-            if (best.videoDecodeQueueFamilyIndex == VK_QUEUE_FAMILY_IGNORED) {
-                best.videoDecodeQueueFamilyIndex = queueIndex;
-                best.videoDecodeQueueProperties = queues[queueIndex].queueFamilyProperties;
-                best.videoDecodeCaps = videoProperties[queueIndex].videoCodecOperations;
-            } else if (best.videoDecodeQueueFamilyIndexSecondary == VK_QUEUE_FAMILY_IGNORED) {
-                best.videoDecodeQueueFamilyIndexSecondary = queueIndex;
-                best.videoDecodeQueuePropertiesSecondary =
-                    queues[queueIndex].queueFamilyProperties;
-                best.videoDecodeCapsSecondary = videoProperties[queueIndex].videoCodecOperations;
-            }
-        }
-    }
-    if (best.properties.limits.maxPushConstantsSize < 16u) {
-        throw std::runtime_error(
-            "selected Vulkan device has less than 16 bytes of push constants");
-    }
-
-    VkPhysicalDevicePushDescriptorPropertiesKHR pushProperties{};
-    pushProperties.sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR;
-    VkPhysicalDeviceProperties2 properties2{};
-    properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    properties2.pNext = &pushProperties;
-    vkGetPhysicalDeviceProperties2(best.physicalDevice, &properties2);
-    if (pushProperties.maxPushDescriptors < 8u) {
-        throw std::runtime_error(
-            "selected Vulkan device supports fewer than 8 push descriptors");
-    }
-    return best;
-}
-
-ComputeShader CreateComputeShader(
-    GpuSession& session,
-    std::span<const std::uint32_t> spirv,
-    std::uint32_t descriptorCount,
-    std::span<const VkDescriptorType> descriptorTypes = {}) {
-    ComputeShader result;
-    try {
-        if (!descriptorTypes.empty() && descriptorTypes.size() != descriptorCount) {
-            throw std::runtime_error("descriptor type count does not match shader bindings");
-        }
-        std::vector<VkDescriptorSetLayoutBinding> bindings(descriptorCount);
-        for (std::uint32_t binding = 0; binding < descriptorCount; ++binding) {
-            const VkDescriptorType descriptorType = descriptorTypes.empty()
-                                                        ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                                                        : descriptorTypes[binding];
-            bindings[binding] = {
-                .binding = binding,
-                .descriptorType = descriptorType,
-                .descriptorCount = 1,
-                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-            };
-        }
-        const VkDescriptorSetLayoutCreateInfo descriptorLayoutInfo = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-            .bindingCount = descriptorCount,
-            .pBindings = bindings.data(),
-        };
-        VkCheck(
-            vkCreateDescriptorSetLayout(
-                session.device,
-                &descriptorLayoutInfo,
-                nullptr,
-                &result.descriptorSetLayout),
-            "vkCreateDescriptorSetLayout");
-
-        const VkPushConstantRange pushConstantRange = {
-            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-            .offset = 0,
-            .size = 4u * sizeof(std::uint32_t),
-        };
-        const VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount = 1,
-            .pSetLayouts = &result.descriptorSetLayout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges = &pushConstantRange,
-        };
-        VkCheck(
-            vkCreatePipelineLayout(
-                session.device,
-                &pipelineLayoutInfo,
-                nullptr,
-                &result.pipelineLayout),
-            "vkCreatePipelineLayout");
-
-        const VkShaderCreateInfoEXT shaderInfo = {
-            .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
-            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-            .nextStage = 0,
-            .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
-            .codeSize = spirv.size_bytes(),
-            .pCode = spirv.data(),
-            .pName = "main",
-            .setLayoutCount = 1,
-            .pSetLayouts = &result.descriptorSetLayout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges = &pushConstantRange,
-        };
-        VkCheck(
-            session.createShaders(
-                session.device, 1, &shaderInfo, nullptr, &result.shader),
-            "vkCreateShadersEXT");
-    } catch (...) {
-        DestroyComputeShader(session, result);
-        throw;
-    }
-    return result;
+    info.queueCreateInfoCount = static_cast<std::uint32_t>(config.queues.size());
+    info.pQueueCreateInfos = config.queues.data();
+    info.enabledExtensionCount = static_cast<std::uint32_t>(session.videoDeviceExtensions.size());
+    info.ppEnabledExtensionNames = session.videoDeviceExtensions.data();
+    return VK_SUCCESS;
 }
 
 std::unique_ptr<GpuSession> CreateGpuSession(
@@ -2653,310 +2160,91 @@ std::unique_ptr<GpuSession> CreateGpuSession(
     bool enableTimestampQueries) {
     auto session = std::make_unique<GpuSession>();
 
-    std::uint32_t loaderVersion = VK_API_VERSION_1_0;
-    VkCheck(vkEnumerateInstanceVersion(&loaderVersion), "vkEnumerateInstanceVersion");
-    if (loaderVersion < VK_API_VERSION_1_3) {
-        throw std::runtime_error("Vulkan loader 1.3 or newer is required");
+    VideoDeviceConfig videoConfig{.session = *session};
+    const gpu::VulkanDeviceConfig interop{.context = &videoConfig, .configure = ConfigureVideoDevice};
+    const auto initialized = gpu::create_device({.vulkan = &interop});
+    if (!initialized.device) {
+        throw std::runtime_error("NoGraphicsAPI device creation failed (Vulkan 1.4, descriptor_heap, "
+                                 "device_address_commands, shader_untyped_pointers, mesh_shader "
+                                 "and coherent CPU-visible device-local memory are required)");
     }
-    const VkApplicationInfo applicationInfo = {
-        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "dssim-Vulkan",
-        .applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
-        .pEngineName = "dssim-vulkan",
-        .engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
-        .apiVersion = VK_API_VERSION_1_3,
-    };
-    const VkInstanceCreateInfo instanceInfo = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pApplicationInfo = &applicationInfo,
-    };
-    VkCheck(
-        vkCreateInstance(&instanceInfo, nullptr, &session->instance),
-        "vkCreateInstance");
-
-    const PhysicalDeviceSelection selection =
-        SelectPhysicalDevice(session->instance);
-    session->physicalDevice = selection.physicalDevice;
-    session->queueFamilyIndex = selection.queueFamilyIndex;
-    session->computeQueueFlags = selection.queueFamilyProperties.queueFlags;
-    session->physicalDeviceProperties = selection.properties;
-    session->adapterName = selection.properties.deviceName;
-    session->videoDecodeQueueFamilyIndex = selection.videoDecodeQueueFamilyIndex;
-    session->videoDecodeQueueFlags = selection.videoDecodeQueueProperties.queueFlags;
-    const auto maskEnabledVideoDecodeExtensions = [&](VkVideoCodecOperationFlagsKHR caps) {
-        if (!HasDeviceExtension(
-                session->physicalDevice,
-                VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME)) {
-            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
-        }
-        if (!HasDeviceExtension(
-                session->physicalDevice,
-                VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME)) {
-            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
-        }
-        if (!HasDeviceExtension(
-                session->physicalDevice,
-                VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME)) {
-            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR;
-        }
-        if (!HasDeviceExtension(
-                session->physicalDevice,
-                VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME)) {
-            caps &= ~VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
-        }
-        return caps;
-    };
-    session->videoDecodeCaps = maskEnabledVideoDecodeExtensions(selection.videoDecodeCaps);
-    session->videoDecodeQueueFamilyIndexSecondary =
-        selection.videoDecodeQueueFamilyIndexSecondary;
-    session->videoDecodeQueueFlagsSecondary =
-        selection.videoDecodeQueuePropertiesSecondary.queueFlags;
-    session->videoDecodeCapsSecondary =
-        maskEnabledVideoDecodeExtensions(selection.videoDecodeCapsSecondary);
-    session->videoSupported =
-        selection.videoDecodeQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED &&
-        session->videoDecodeCaps != 0;
-
-    const bool hasVideoMaintenance1 =
-        session->videoSupported &&
-        HasDeviceExtension(
-            session->physicalDevice,
-            VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME);
-    VkPhysicalDeviceVideoMaintenance1FeaturesKHR videoMaintenance1Features{};
-    videoMaintenance1Features.sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_MAINTENANCE_1_FEATURES_KHR;
-    videoMaintenance1Features.videoMaintenance1 = VK_TRUE;
-    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{};
-    shaderObjectFeatures.sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT;
-    shaderObjectFeatures.pNext =
-        hasVideoMaintenance1 ? &videoMaintenance1Features : nullptr;
-    shaderObjectFeatures.shaderObject = VK_TRUE;
-    VkPhysicalDeviceVulkan13Features vulkan13Features{};
-    vulkan13Features.sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    vulkan13Features.pNext = &shaderObjectFeatures;
-    vulkan13Features.synchronization2 = VK_TRUE;
-    vulkan13Features.dynamicRendering = VK_TRUE;
-    VkPhysicalDeviceVulkan12Features vulkan12Features{};
-    vulkan12Features.sType =
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    vulkan12Features.pNext = &vulkan13Features;
-    vulkan12Features.timelineSemaphore = VK_TRUE;
-
-    const float queuePriority = 1.0f;
-    const VkDeviceQueueCreateInfo computeQueueInfo = {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = session->queueFamilyIndex,
-        .queueCount = 1,
-        .pQueuePriorities = &queuePriority,
-    };
-    std::array<VkDeviceQueueCreateInfo, 3> queueInfos = {computeQueueInfo, {}, {}};
-    std::uint32_t queueInfoCount = 1;
-    if (session->videoSupported &&
-        session->videoDecodeQueueFamilyIndex != session->queueFamilyIndex) {
-        queueInfos[queueInfoCount++] = {
-            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = session->videoDecodeQueueFamilyIndex,
-            .queueCount = 1,
-            .pQueuePriorities = &queuePriority,
-        };
-    }
-    if (session->videoSupported &&
-        session->videoDecodeQueueFamilyIndexSecondary != VK_QUEUE_FAMILY_IGNORED &&
-        session->videoDecodeQueueFamilyIndexSecondary != session->queueFamilyIndex &&
-        session->videoDecodeQueueFamilyIndexSecondary != session->videoDecodeQueueFamilyIndex) {
-        queueInfos[queueInfoCount++] = {
-            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = session->videoDecodeQueueFamilyIndexSecondary,
-            .queueCount = 1,
-            .pQueuePriorities = &queuePriority,
-        };
-    }
-    std::vector<const char*> deviceExtensions = {
-        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
-        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
-    };
-    if (session->videoSupported) {
-        deviceExtensions.push_back(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME);
-        const VkVideoCodecOperationFlagsKHR allVideoDecodeCaps =
-            session->videoDecodeCaps | session->videoDecodeCapsSecondary;
-        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR) != 0) {
-            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME);
-        }
-        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) != 0) {
-            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME);
-        }
-        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR) != 0) {
-            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_VP9_EXTENSION_NAME);
-        }
-        if ((allVideoDecodeCaps & VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) != 0) {
-            deviceExtensions.push_back(VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME);
-        }
-        if (hasVideoMaintenance1) {
-            deviceExtensions.push_back(VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME);
-        }
-        session->videoDeviceExtensions = deviceExtensions;
-    }
-    VkDeviceCreateInfo deviceInfo{};
-    deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext = &vulkan12Features;
-    deviceInfo.queueCreateInfoCount = queueInfoCount;
-    deviceInfo.pQueueCreateInfos = queueInfos.data();
-    deviceInfo.enabledExtensionCount =
-        static_cast<std::uint32_t>(deviceExtensions.size());
-    deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
-    VkCheck(
-        vkCreateDevice(
-            session->physicalDevice, &deviceInfo, nullptr, &session->device),
-        "vkCreateDevice");
-    vkGetDeviceQueue(
-        session->device,
-        session->queueFamilyIndex,
-        0,
-        &session->queue);
-
-    session->createShaders = reinterpret_cast<PFN_vkCreateShadersEXT>(
-        vkGetDeviceProcAddr(session->device, "vkCreateShadersEXT"));
-    session->destroyShader = reinterpret_cast<PFN_vkDestroyShaderEXT>(
-        vkGetDeviceProcAddr(session->device, "vkDestroyShaderEXT"));
-    session->cmdBindShaders = reinterpret_cast<PFN_vkCmdBindShadersEXT>(
-        vkGetDeviceProcAddr(session->device, "vkCmdBindShadersEXT"));
-    session->cmdPushDescriptorSet =
-        reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
-            vkGetDeviceProcAddr(session->device, "vkCmdPushDescriptorSetKHR"));
-    if (session->createShaders == nullptr || session->destroyShader == nullptr ||
-        session->cmdBindShaders == nullptr ||
-        session->cmdPushDescriptorSet == nullptr) {
-        throw std::runtime_error(
-            "Vulkan driver did not expose required shader object/push descriptor commands");
-    }
-
+    session->gpuDevice = initialized.device;
+    const auto native = gpu::get_vulkan_device(session->gpuDevice);
+    session->instance = native.instance;
+    session->physicalDevice = native.physical_device;
+    session->device = native.device;
+    session->queueFamilyIndex = native.queue_family;
+    vkGetPhysicalDeviceProperties(session->physicalDevice, &session->physicalDeviceProperties);
+    session->adapterName = gpu::get_device_caps(session->gpuDevice).device_name;
+    const auto& limits = session->physicalDeviceProperties.limits;
+    if (limits.maxComputeWorkGroupInvocations < 256 || limits.maxComputeWorkGroupSize[0] < 16 ||
+        limits.maxComputeWorkGroupSize[1] < 16 || limits.maxComputeSharedMemorySize < 20 * 20 * 16 ||
+        gpu::get_device_caps(session->gpuDevice).max_push_data_size < sizeof(ComputeRoot))
+        throw std::runtime_error("NoGraphicsAPI device does not meet DSSIM compute limits");
     const auto resourceStartedAt = std::chrono::steady_clock::now();
-    const VkCommandPoolCreateInfo commandPoolInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = session->queueFamilyIndex,
-    };
-    VkCheck(
-        vkCreateCommandPool(
-            session->device,
-            &commandPoolInfo,
-            nullptr,
-            &session->commandPool),
-        "vkCreateCommandPool");
-    const VkCommandBufferAllocateInfo commandBufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = session->commandPool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-    VkCheck(
-        vkAllocateCommandBuffers(
-            session->device,
-            &commandBufferInfo,
-            &session->commandBuffer),
-        "vkAllocateCommandBuffers");
-    const VkFenceCreateInfo fenceInfo = {
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
-    };
-    VkCheck(
-        vkCreateFence(
-            session->device, &fenceInfo, nullptr, &session->submitFence),
-        "vkCreateFence");
-
-    session->timestampQueryEnabled =
-        enableTimestampQueries &&
-        selection.queueFamilyProperties.timestampValidBits != 0u;
-    session->timestampValidBits =
-        session->timestampQueryEnabled
-            ? selection.queueFamilyProperties.timestampValidBits
-            : 0u;
+    session->completion = gpu::create_timeline_semaphore(session->gpuDevice);
+    session->timestampQueryEnabled = enableTimestampQueries && session->timestampValidBits != 0;
     if (session->timestampQueryEnabled) {
-        const VkQueryPoolCreateInfo queryPoolInfo = {
+        const VkQueryPoolCreateInfo queryInfo{
             .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-            .queryType = VK_QUERY_TYPE_TIMESTAMP,
-            .queryCount = 2,
+            .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2,
         };
-        VkCheck(
-            vkCreateQueryPool(
-                session->device,
-                &queryPoolInfo,
-                nullptr,
-                &session->timestampQueryPool),
-            "vkCreateQueryPool");
+        VkCheck(vkCreateQueryPool(session->device, &queryInfo, nullptr, &session->timestampQueryPool),
+                "vkCreateQueryPool");
     }
-
     session->srgbToLinearLutBuffer = CreateBuffer(
         *session,
         256u * sizeof(float),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        gpu::MemoryType::cpu_visible);
     const auto& lut = SrgbToLinearLut();
     std::memcpy(
         session->srgbToLinearLutBuffer.mapped,
         lut.data(),
         lut.size() * sizeof(float));
-    FlushMappedBuffer(session->srgbToLinearLutBuffer);
+
     session->initProfiling.createBuffersTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - resourceStartedAt);
 
     const auto shadersStartedAt = std::chrono::steady_clock::now();
     session->rgba8ToLinearShader =
-        CreateComputeShader(*session, rgba8ToLinearSpirv, 3);
+        gpu::create_compute_pso(session->gpuDevice, rgba8ToLinearSpirv);
     session->preprocessShader =
-        CreateComputeShader(*session, labPreprocessSpirv, 2);
+        gpu::create_compute_pso(session->gpuDevice, labPreprocessSpirv);
     session->stage0ScoreShader =
-        CreateComputeShader(*session, stage0ScoreSpirv, 3);
+        gpu::create_compute_pso(session->gpuDevice, stage0ScoreSpirv);
     session->reduceSumShader =
-        CreateComputeShader(*session, reduceSumSpirv, 2);
+        gpu::create_compute_pso(session->gpuDevice, reduceSumSpirv);
     session->reduceAbsDeviationShader =
-        CreateComputeShader(*session, reduceAbsDeviationSpirv, 3);
+        gpu::create_compute_pso(session->gpuDevice, reduceAbsDeviationSpirv);
     if (enableDebugPipeline) {
         session->stage0Shader =
-            CreateComputeShader(*session, stage0Spirv, 8);
+            gpu::create_compute_pso(session->gpuDevice, stage0Spirv);
     }
     session->downsampleShader =
-        CreateComputeShader(*session, downsampleSpirv, 2);
+        gpu::create_compute_pso(session->gpuDevice, downsampleSpirv);
     if (session->videoSupported) {
-        const std::array<VkDescriptorType, 3> videoDescriptorTypes = {
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        session->vulkanYuvToRgbaShader = gpu::create_compute_pso(session->gpuDevice, vulkanYuvToRgbaSpirv);
+        const auto& caps = gpu::get_device_caps(session->gpuDevice);
+        session->videoTextureHeap = gpu::create_gpu_heap(session->gpuDevice, 4 * caps.texture_descriptor_size,
+                                                        gpu::MemoryType::texture_descriptor_heap);
+        session->videoSamplerHeap = gpu::create_gpu_heap(session->gpuDevice, 2 * caps.sampler_descriptor_size,
+                                                        gpu::MemoryType::sampler_descriptor_heap);
+        gpu::SamplerDesc sampler{
+            .min_filter = gpu::Filter::nearest, .mag_filter = gpu::Filter::nearest,
+            .mip_filter = gpu::Filter::nearest,
+            .address_u = gpu::AddressMode::clamp_to_edge,
+            .address_v = gpu::AddressMode::clamp_to_edge,
+            .address_w = gpu::AddressMode::clamp_to_edge,
         };
-        session->vulkanYuvToRgbaShader = CreateComputeShader(
-            *session,
-            vulkanYuvToRgbaSpirv,
-            3,
-            videoDescriptorTypes);
-        const VkSamplerCreateInfo ySamplerInfo = {
-            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-            .magFilter = VK_FILTER_NEAREST,
-            .minFilter = VK_FILTER_NEAREST,
-            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .minLod = 0.0f,
-            .maxLod = 0.0f,
-        };
-        const VkSamplerCreateInfo uvSamplerInfo = {
-            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-            .magFilter = VK_FILTER_LINEAR,
-            .minFilter = VK_FILTER_LINEAR,
-            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .minLod = 0.0f,
-            .maxLod = 0.0f,
-        };
-        VkCheck(vkCreateSampler(session->device, &ySamplerInfo, nullptr, &session->videoYSampler), "vkCreateSampler(y)");
-        VkCheck(vkCreateSampler(session->device, &uvSamplerInfo, nullptr, &session->videoUvSampler), "vkCreateSampler(uv)");
+        gpu::write_sampler_descriptor(session->gpuDevice, session->videoSamplerHeap.range.cpu, sampler);
+        sampler.min_filter = gpu::Filter::linear;
+        sampler.mag_filter = gpu::Filter::linear;
+        gpu::write_sampler_descriptor(session->gpuDevice,
+            session->videoSamplerHeap.range.cpu + caps.sampler_descriptor_size, sampler);
+        session->writeResourceDescriptors = reinterpret_cast<PFN_vkWriteResourceDescriptorsEXT>(
+            vkGetDeviceProcAddr(session->device, "vkWriteResourceDescriptorsEXT"));
+        if (!session->writeResourceDescriptors) throw std::runtime_error("missing resource descriptor command");
     }
     session->initProfiling.createShaderModuleTime =
         std::chrono::duration_cast<std::chrono::milliseconds>(

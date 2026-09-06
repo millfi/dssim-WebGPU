@@ -101,6 +101,7 @@ try {
     }
     Write-Host "Using verified minimal FFmpeg from $FfmpegRoot"
 
+    & (Join-Path $PSScriptRoot 'setup_slang.ps1')
     & cmake -S . -B $BuildDirectory
     if ($LASTEXITCODE -ne 0) {
         throw "CMake configure failed with exit code $LASTEXITCODE."

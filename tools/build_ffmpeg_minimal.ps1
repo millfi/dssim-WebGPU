@@ -322,9 +322,9 @@ $LinkageArguments = if ($Linkage -eq 'Dynamic') {
 }
 
 # Keep only the containers, parsers, codecs, and hardware accelerators needed
-# by the two consumers of this shared prefix. dssim-Vulkan consumes
-# AV_PIX_FMT_VULKAN frames, while src_reference uses AV_PIX_FMT_D3D11 frames.
-# Still images use the CPU-side libswscale conversion to RGBA8.
+# by dssim-Vulkan and the src_reference video comparator. The GPU comparator
+# consumes AV_PIX_FMT_VULKAN frames; the reference transfers those frames to
+# the CPU for RGB conversion. Still images use the CPU-side libswscale path.
 $ConfigureArguments = @(
     '--toolchain=msvc', '--arch=x86_64',
     "--prefix=$PrefixBashPath"
@@ -340,11 +340,8 @@ $ConfigureArguments = @(
     '--enable-parser=h264,hevc,av1,vp9,jpegxl',
     '--enable-decoder=h264,hevc,av1,vp9,libdav1d,png,mjpeg,libjxl,jpeg2000,webp',
     '--enable-libdav1d', '--enable-libjxl',
-    '--enable-vulkan', '--enable-d3d11va',
-    # FFmpeg 8.1.2's Makefile keys the shared dxva2_*.o implementation files
-    # on the legacy *_d3d11va switches, even though src_reference consumes the
-    # *_d3d11va2 configurations. Enable both forms so those symbols are linked.
-    '--enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan,vp9_vulkan,h264_d3d11va,hevc_d3d11va,av1_d3d11va,vp9_d3d11va,h264_d3d11va2,hevc_d3d11va2,av1_d3d11va2,vp9_d3d11va2',
+    '--enable-vulkan',
+    '--enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan,vp9_vulkan',
     # Rust's MSVC target uses the dynamic CRT. Match it in FFmpeg so the
     # FFmpeg objects do not introduce LIBCMT and cause LNK4098 at the final
     # executable link.

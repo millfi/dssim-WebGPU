@@ -11,3 +11,6 @@ third_party/ffmpeg-build/
 third_party/ffmpeg-*/
 third_party/vcpkg/
 build_nothirdparty/
+
+third_party/slang-*/
+third_party/slang-*.zip

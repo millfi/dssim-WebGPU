@@ -1,15 +1,15 @@
 # dssim-Vulkan
 
-DSSIM画像類似度評価アルゴリズムをC++20とVulkanで実装した高速化、動画対応を追加したものです。
+DSSIM画像類似度評価アルゴリズムをC++20と[NoGraphicsAPI](https://github.com/sebbbi/NoGraphicsAPI)（Vulkan）で実装した高速化、動画対応を追加したものです。
 
 ## 必要環境
 
 - 次の機能に対応するVulkan GPUとドライバーを搭載したWindows
-  - Vulkan 1.3
-  - `VK_EXT_shader_object`
-  - `VK_KHR_push_descriptor`
-  - Vulkan 1.3の`synchronization2`および`dynamicRendering`機能
-- Vulkan loaderライブラリとヘッダー、および`glslc`を含むVulkan SDK
+  - Vulkan 1.4
+  - `VK_EXT_descriptor_heap`
+  - `VK_KHR_device_address_commands`, `VK_KHR_shader_untyped_pointers`, `VK_EXT_mesh_shader`
+  - Vulkan 1.4の`synchronization2`および`dynamicRendering`機能
+- Vulkan loaderライブラリとヘッダー、および`slangc` (2026.14.1+) / `spirv-val` (2026.3+)を含むVulkan SDK
 - PowerShell
 - CMake 3.24以降
 - C++20対応コンパイラ
@@ -20,7 +20,7 @@ DSSIM画像類似度評価アルゴリズムをC++20とVulkanで実装した高�
 トップレベルのCMake設定が自動的にC++20を選択するため、ビルド時に
 C++標準の追加フラグを指定する必要はありません。
 
-CMakeは`find_package(Vulkan REQUIRED COMPONENTS glslc)`でSDKを検出します。
+CMakeは`find_package(Vulkan 1.4.357 REQUIRED)`でSDKを検出します。
 通常のVulkan SDKインストールで設定される`VULKAN_SDK`をCMakeが利用できます。
 SDKを自動取得する処理はありません。
 
@@ -29,6 +29,21 @@ SDKを自動取得する処理はありません。
 デコーダー（H.264/HEVC/VP9/AV1）から`AV_PIX_FMT_VULKAN`フレームを受け取り、
 NV12またはP010のVulkan imageをGPU内でRGBA8へ変換します。デコードフレームの
 CPU readbackはありません。
+
+NoGraphicsAPIはthird_party/NoGraphicsAPIに固定コミットで同梱しています。
+FFmpeg連携用の拡張は同ディレクトリのREADME.dssim.mdに記載しています。
+coherentかつhost-visibleなdevice-localメモリ（Resizable BARまたはUMA）が必要です。
+.compファイルはSlangで、-lang slangを指定してコンパイルします。
+src_gpu/shaders/compute_root.hでC++とシェーダーの引数構造を共有します。
+Vulkan SDK 1.4.357以降が必要です。
+
+Windows用の固定版Slangをリポジトリ内に導入するには、次を実行します。
+
+```powershell
+& .\tools\setup_slang.ps1
+```
+
+C++ツールチェーンを読み込んだDeveloper PowerShellからビルドしてください。
 
 ## build
 ```powershell
@@ -56,7 +71,7 @@ build\src_gpu\Release\dssim-Vulkan.exe
 
 ルートのCMake設定は従来のconfigureコマンドとの互換性を維持し、
 GPUターゲットの定義を`src_gpu/CMakeLists.txt`へ委譲します。ビルド時に
-`glslc`が`src_gpu/shaders`のGLSLコンピュートシェーダーをSPIR-Vへ
+`slangc` (2026.14.1+) / `spirv-val` (2026.3+)が`src_gpu/shaders`のSlangコンピュートシェーダーをSPIR-Vへ
 コンパイルし、実行ファイルの隣へ配置します。
 
 ```text
@@ -150,9 +165,9 @@ Get-Content .\tests\test_pairs.txt |
 ```
 
 `--stdin-pairs` ではVulkan instanceとdeviceを作成し、SPIR-Vを読み込んで
-shader objectをプロセス内で一度だけ作成し、すべてのペアで再利用します。
-画像解像度はpush constantsとディスパッチ数で指定されるため、解像度が
-異なってもshader objectを作り直す必要はありません。
+compute PSOをプロセス内で一度だけ作成し、すべてのペアで再利用します。
+画像解像度はroot dataとディスパッチ数で指定されるため、解像度が
+異なってもcompute PSOを作り直す必要はありません。
 
 `--stdin-pairs` は `--out`、`--csv`、`--pipeline-depth`、
 `--debug-dump-dir` と同時には使えません。
@@ -199,7 +214,7 @@ query結果は、選択したcompute queueが対応している場合にのみ�
 
 セッション初期化:
 
-- `session_init_pipeline_setup_ms`: pipeline layoutとshader objectの作成
+- `session_init_pipeline_setup_ms`: NoGraphicsAPI compute PSOの作成
 - `session_init_resource_prep_ms`: セッション単位のリソース準備
 - `session_init_gpu_submit_wait_ms`: セッション単位のGPU送信・待機
 - `session_init_gpu_timestamp_ms`: セッション単位のVulkan timestamp query時間
@@ -234,22 +249,18 @@ query結果は、選択したcompute queueが対応している場合にのみ�
 - `post_process_remaining_scales_ms`
 - `post_process_ms`
 
-`dispatch_and_submit_ms` はCPU側のコマンド構築・送信時間であり、
-純粋なシェーダー実行時間ではありません。`readback_ms` にはGPU完了待ちと
-host readback時間が含まれます。CPUとGPUは非同期に重なるため、
-`gpu_timestamp_ms` はwall-clock時間区分の合計には含まれません。
-2つのscale別post-process項目も、並列集計時には互いに重なる独立時間です。
-JSONのfield名は互換性のため維持しています。shader objectを使うため、
-`create_pso_ms`と`create_bind_group_ms`は0になる想定です。shader objectと
-pipeline layoutの処理は、対応する既存bucketへ計上します。timestamp queryは
-任意機能であり、queueが非対応でも比較処理とwall-clock profilingは動作します。
+JSONのフィールド名は互換性のため維持しています。NoGraphicsAPIのPSO作成時間は
+従来のcreate_shader_module_msへ計上します。create_pso_ms、
+create_pipeline_layout_ms、create_bind_group_msは0です。
+gpu_timestamp_msは独立したGPU時間で、CPUのwall-clock合計には含めません。
+timestamp query非対応のqueueでも比較とwall-clock profilingは動作します。
 
 ## 現在の高速化設計
 
-- shader objectはプロセス内で一度だけ作成し、すべての解像度で再利用する
+- compute PSOはプロセス内で一度だけ作成し、すべての解像度で再利用する
 - stageバッファは、それまでに処理した最大画像まで拡張し、各スケールと
   後続ペアで再利用する
-- push descriptorによりdescriptor poolとdescriptor setの割り当てを省く
+- バッファはGPUアドレスをroot dataで渡し、動画の画像はdescriptor heapで参照する
 - デバッグ統計用リソースは通常のベンチマーク経路とは別にキャッシュする
 - sRGBからlinearへの変換には256要素のルックアップテーブルを使用する
 - 通常経路では2枚の入力をGPUで変換し、CPUへの途中round-tripなしで全scaleの
@@ -268,15 +279,15 @@ pipeline layoutの処理は、対応する既存bucketへ計上します。times
 ## Vulkan SDKとシェーダー
 
 configureの前にVulkan SDKをインストールしてください。ビルドにはSDKの
-loaderライブラリ、ヘッダー、`glslc`が必要で、いずれかが見つからない場合は
+loaderライブラリ、ヘッダー、`slangc` (2026.14.1+) / `spirv-val` (2026.3+)が必要で、いずれかが見つからない場合は
 configureが明確なエラーで終了します。PowerShellからシェーダーコンパイラを
 確認できます。
 
 ```powershell
-& glslc --version
+& .\third_party\slang-2026.14.1\bin\slangc.exe -version
 ```
 
-ビルド時に次のGLSLコンピュートシェーダーをSPIR-Vへコンパイルします。
+ビルド時に次のSlangコンピュートシェーダーをSPIR-Vへコンパイルします。
 アプリケーション起動時のシェーダーコンパイルは行いません。
 
 - `rgba8_to_linear.comp`

@@ -1,52 +1,52 @@
-#version 460
+#include "compute_root.h"
+[[vk::push_constant]] ConstantBuffer<ComputeRoot> root;
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
-
-layout(set = 0, binding = 0) uniform sampler2D y_plane;
-layout(set = 0, binding = 1) uniform sampler2D uv_plane;
-
-layout(std430, set = 0, binding = 2) writeonly buffer OutputRgba8Buffer {
-    uint values[];
-} out_rgba8;
-
-layout(push_constant) uniform Params {
-    uint width;
-    uint height;
-    uint bit_depth;
-    uint full_range;
-} params;
-
-void main() {
-    uvec3 gid = gl_GlobalInvocationID;
-    if (gid.x >= params.width || gid.y >= params.height) {
+uint packRgba8(float4 value) {
+    uint4 packed = uint4(round(saturate(value) * 255.0));
+    return packed.x | (packed.y << 8) | (packed.z << 16) | (packed.w << 24);
+}
+[numthreads(16, 16, 1)]
+void computeMain(uint3 dispatchID : SV_DispatchThreadID,
+                 uint3 groupThreadID : SV_GroupThreadID,
+                 uint groupIndex : SV_GroupIndex,
+                 uint3 groupID : SV_GroupID) {
+    Texture2D<float4> y_plane = ResourceDescriptorHeap[root.yIndex];
+    Texture2D<float4> uv_plane = ResourceDescriptorHeap[root.uvIndex];
+    SamplerState y_sampler = SamplerDescriptorHeap[0];
+    SamplerState uv_sampler = SamplerDescriptorHeap[1];
+    uint y_width, y_height, uv_width, uv_height;
+    y_plane.GetDimensions(y_width, y_height);
+    uv_plane.GetDimensions(uv_width, uv_height);
+    uint3 gid = dispatchID;
+    if (gid.x >= root.params[0] || gid.y >= root.params[1]) {
         return;
     }
 
-    vec2 position = (vec2(gid.xy) + vec2(0.5)) /
-                    vec2(textureSize(y_plane, 0));
-    float y = texture(y_plane, position).r;
-    vec2 uv_position = position;
-    ivec2 uv_extent = textureSize(uv_plane, 0);
+    float2 position = (float2(gid.xy) + float2(0.5)) /
+                    float2(uint2(y_width, y_height));
+    float y = y_plane.SampleLevel(y_sampler, position, 0).r;
+    float2 uv_position = position;
+    int2 uv_extent = uint2(uv_width, uv_height);
     uv_position.x = (floor(position.x * float(uv_extent.x)) + 0.5) /
                     float(uv_extent.x);
     uv_position.y = (floor(position.y * float(uv_extent.y)) + 0.5) /
                     float(uv_extent.y);
-    vec2 uv = texture(uv_plane, uv_position).rg;
+    float2 uv = uv_plane.SampleLevel(uv_sampler, uv_position, 0).rg;
 
-    float max_code = float((1u << params.bit_depth) - 1u);
-    if (params.full_range == 0u) {
+    float max_code = float((1u << root.params[2]) - 1u);
+    if (root.params[3] == 0u) {
         y = (y - 16.0 / max_code) * (max_code / 219.0);
-        uv = (uv - vec2(128.0 / max_code)) * (max_code / 224.0);
+        uv = (uv - float2(128.0 / max_code)) * (max_code / 224.0);
     } else {
-        uv -= vec2(0.5);
+        uv -= float2(0.5);
     }
 
     // Both benchmark files are BT.709 limited-range video. The matrix is
     // kept in the shader so the decoded image never visits CPU memory.
-    vec3 rgb = vec3(
+    float3 rgb = float3(
         y + 1.5748 * uv.y,
         y - 0.187324 * uv.x - 0.468124 * uv.y,
         y + 1.8556 * uv.x);
     rgb = clamp(rgb, 0.0, 1.0);
-    out_rgba8.values[gid.y * params.width + gid.x] = packUnorm4x8(vec4(rgb, 1.0));
+    ((uint*)root.buffers[2])[gid.y * root.params[0] + gid.x] = packRgba8(float4(rgb, 1.0));
 }
