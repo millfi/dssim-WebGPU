@@ -2,6 +2,7 @@ dssim
 target/
 build*/
 out/
+benchmark/raw1k.mp4
 tests/out_*.json
 # Legacy local toolchain checkouts are not part of the Vulkan build.
 third_party/dawn/
