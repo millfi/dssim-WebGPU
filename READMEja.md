@@ -42,11 +42,16 @@ or
 & cmake --build build --config Release --target dssim_vulkan
 ```
 
-`build_gpu.ps1`は展開前に固定SHA-256でarchiveを検証します。archiveがないか変更されて
-いる場合はGitHubの`origin`にある現在のcommitから同じarchiveをdownloadし、検証後に
-置換します。archive内容の再生成には`build_ffmpeg_minimal.ps1`を使用できます。
-repository内へdownloadしたvcpkgのdownload fileとbinary cacheはどちらも
-`third_party/vcpkg`配下へ保存され、user共通のAppData cacheは使用しません。
+`third_party/ffmpeg-8.1.2` に未改変の上流ソースを配置しています。
+`build_gpu.ps1` は GPU 専用の作業コピーに AMD AV1 パッチを適用し、Vulkan Video を
+有効にした DLL を `third_party/ffmpeg-gpu-shared` にビルドします。
+上記の CMake 手動ビルド前には `& .\tools\build_ffmpeg_minimal.ps1 -Variant Gpu` を実行してください。
+
+reference は `& .\tools\build_reference.ps1` でビルドします。パッチを適用せず、
+D3D11VA を有効、Vulkan を無効にした DLL を `third_party/ffmpeg-reference-shared` に生成します。
+両者とも動的リンクし、それぞれの実行ファイル横に専用 DLL を配置します。共通 PATH や
+バイナリ ZIP は使用しません。FFmpeg のビルドには Visual Studio x64 C++ ツール、
+MSYS2 の make/diffutils、GPU 用には Vulkan SDK が必要です。libdav1d/libjxl/pkgconf は vcpkg から取得します。
 
 実行ファイルは次の場所に生成されます。
 

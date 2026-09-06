@@ -8,8 +8,14 @@
 - Use PowerShell for every repository command. Do not provide Command Prompt, batch, Bash, or POSIX-shell commands.
 - Invoke executables and scripts with PowerShell's call operator (`&`) when appropriate.
 - `dssim_vulkan` always links the minimal FFmpeg Vulkan Video build under
-  `third_party/ffmpeg-8.1.2-shared`, including for PNG-only work. If it is absent,
-  create it with `& .\tools\build_ffmpeg_minimal.ps1 -Linkage Dynamic` before configuring.
+  `third_party/ffmpeg-gpu-shared`, including for PNG-only work. If it is absent,
+  create it with `& .\tools\build_ffmpeg_minimal.ps1 -Variant Gpu` before configuring.
+- Keep the vendored upstream source in `third_party/ffmpeg-8.1.2` unmodified.
+  Apply the AMD AV1 compatibility patch only to the GPU build's private source copy.
+- Reference uses separate, unpatched D3D11VA FFmpeg DLLs in
+  `third_party/ffmpeg-reference-shared`; build with `& .\tools\build_reference.ps1`.
+- Both FFmpeg variants must use dynamic linking. Copy each variant's DLLs next
+  to its own executable; never share a runtime DLL directory or ship a binary ZIP.
 
 ## Verification workflow
 
@@ -113,7 +119,7 @@ reference executable or a reproducibly generated same-input result.
   2. Run the fixed benchmark command.
   3. Run `& .\tools\check_regression.ps1`.
   4. Require every pair to pass before committing.
-- `tools/check_regression.ps1` builds `src_reference\target\release\dssim.exe` when absent, runs both implementations, and exits nonzero on a tolerance violation.
+- `tools/check_regression.ps1` refreshes `src_reference\target\release\dssim.exe` and its reference DLLs, runs both implementations, and exits nonzero on a tolerance violation.
 - Do not update reference scores by hand.
 - Use `--out <json>` for per-scale inspection and `--debug-dump-dir` for buffer-level investigation.
 

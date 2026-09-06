@@ -117,44 +117,11 @@ $repositoryRoot = Resolve-ExistingPath (Join-Path $PSScriptRoot "..")
 $pairListPath = Resolve-ExistingPath $PairList
 $gpuPath = Resolve-ExistingPath $GpuExecutable
 $referencePath = Join-Path $repositoryRoot "src_reference\target\release\dssim.exe"
-$referenceManifest = Join-Path $repositoryRoot "src_reference\Cargo.toml"
-$ffmpegRoot = Join-Path $repositoryRoot "third_party\ffmpeg-8.1.2-shared"
-
-if (-not (Test-Path -LiteralPath $referencePath -PathType Leaf)) {
-    if (-not (Test-Path -LiteralPath $referenceManifest -PathType Leaf)) {
-        throw "Reference Cargo manifest was not found: $referenceManifest"
-    }
-    if (-not (Test-Path -LiteralPath $ffmpegRoot -PathType Container)) {
-        throw "FFmpeg prefix was not found: $ffmpegRoot. Build it with tools/build_ffmpeg_minimal.ps1 first."
-    }
-    $cargoCommand = Get-Command cargo.exe -CommandType Application -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($null -eq $cargoCommand) {
-        throw "cargo.exe was not found; it is required to build the local reference executable."
-    }
-
-    $previousFfmpegDir = $env:FFMPEG_DIR
-    try {
-        $env:FFMPEG_DIR = (Resolve-ExistingPath $ffmpegRoot)
-        Write-Host "Building local reference executable: $referencePath"
-        & $cargoCommand.Source build --manifest-path $referenceManifest --release --features video
-        if ($LASTEXITCODE -ne 0) {
-            throw "Reference cargo build exited with code $LASTEXITCODE."
-        }
-    } finally {
-        if ($null -eq $previousFfmpegDir) {
-            Remove-Item Env:FFMPEG_DIR -ErrorAction SilentlyContinue
-        } else {
-            $env:FFMPEG_DIR = $previousFfmpegDir
-        }
-    }
-}
-
+# Always refresh the reference executable and its app-local DLLs, including when
+# an older reference executable already exists.
+$referenceMarker = Join-Path $repositoryRoot 'third_party\ffmpeg-reference-shared\dssim-ffmpeg-variant.txt'
+& (Join-Path $PSScriptRoot 'build_reference.ps1') -SkipFfmpegBuild:(Test-Path -LiteralPath $referenceMarker)
 $referencePath = Resolve-ExistingPath $referencePath
-$ffmpegBin = Join-Path $ffmpegRoot "bin"
-if (Test-Path -LiteralPath $ffmpegBin -PathType Container) {
-    $env:PATH = "$(Resolve-ExistingPath $ffmpegBin);$env:PATH"
-}
 
 $pairs = @()
 $lineNumber = 0

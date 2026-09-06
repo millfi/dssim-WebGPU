@@ -1,7 +1,19 @@
 find_package(Vulkan 1.3 REQUIRED COMPONENTS glslc)
 
-set(DSSIM_FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/third_party/ffmpeg-8.1.2-shared" CACHE PATH
-    "FFmpeg prefix containing the Vulkan Video development headers and import libraries")
+set(DSSIM_FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/third_party/ffmpeg-gpu-shared")
+set(_ffmpeg_marker "${DSSIM_FFMPEG_ROOT}/dssim-ffmpeg-variant.txt")
+if(NOT EXISTS "${_ffmpeg_marker}")
+    message(FATAL_ERROR "Build patched GPU FFmpeg DLLs with tools/build_ffmpeg_minimal.ps1 -Variant Gpu first.")
+endif()
+file(READ "${_ffmpeg_marker}" _ffmpeg_variant)
+string(STRIP "${_ffmpeg_variant}" _ffmpeg_variant)
+if(NOT _ffmpeg_variant STREQUAL "gpu-shared-v1")
+    message(FATAL_ERROR "GPU FFmpeg variant mismatch")
+endif()
+# Invalidate entries that could still select the legacy shared build.
+foreach(_component INCLUDE_DIR AVCODEC_LIBRARY AVFORMAT_LIBRARY AVUTIL_LIBRARY SWSCALE_LIBRARY)
+    unset(DSSIM_FFMPEG_${_component} CACHE)
+endforeach()
 find_path(DSSIM_FFMPEG_INCLUDE_DIR
     NAMES libavcodec/avcodec.h
     PATHS "${DSSIM_FFMPEG_ROOT}/include"
@@ -19,7 +31,7 @@ if(NOT DSSIM_FFMPEG_INCLUDE_DIR OR NOT DSSIM_FFMPEG_AVCODEC_LIBRARY OR
    NOT DSSIM_FFMPEG_SWSCALE_LIBRARY)
     message(FATAL_ERROR
         "Vulkan Video FFmpeg development files were not found under ${DSSIM_FFMPEG_ROOT}. "
-        "Run tools/build_ffmpeg_minimal.ps1 -Linkage Dynamic first.")
+        "Run tools/build_ffmpeg_minimal.ps1 -Variant Gpu first.")
 endif()
 
 include(CheckCXXSourceCompiles)

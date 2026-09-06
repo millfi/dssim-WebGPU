@@ -67,19 +67,16 @@ The optional `video` feature compares corresponding frames in two MP4/MOV/MKV/We
 From a Visual Studio Developer PowerShell with Git Bash/MSYS2 `bash.exe` and GNU `make.exe` on `PATH`, build the stripped shared FFmpeg distribution and then the CLI:
 
 ```powershell
-& .\tools\build_ffmpeg_minimal.ps1
-$env:FFMPEG_DIR = (Resolve-Path .\third_party\ffmpeg-8.1.2-shared)
-& cargo build --manifest-path .\src_reference\Cargo.toml --release --features video
+& .\tools\build_reference.ps1
 ```
 
-The default output is `third_party\ffmpeg-8.1.2-shared`. Its `bin` directory must be on `PATH` when running `dssim.exe`, or its four FFmpeg DLLs must be copied next to `dssim.exe`:
+The reference-only FFmpeg DLLs are installed in `third_party\ffmpeg-reference-shared` and copied next to `dssim.exe` by the build helper. No FFmpeg PATH setting is needed:
 
 ```powershell
-$env:PATH = "$(Resolve-Path .\third_party\ffmpeg-8.1.2-shared\bin);$env:PATH"
 & .\src_reference\target\release\dssim.exe original.webm modified.mp4
 ```
 
-The build script downloads FFmpeg 8.1.2, the latest stable release when this integration was added. It includes only `avutil`, `avcodec`, `avformat`, and `swscale`; file I/O; MOV/MP4 and Matroska/WebM demuxers; H.264, HEVC, AV1, and VP9 parsers/decoders; and their D3D11VA accelerators. It disables the FFmpeg executable, encoders, muxers, filters, network, devices, and all other demuxers/codecs. Pass `-Linkage Static` with an explicit `-Prefix` only when a static distribution is specifically required.
+The build uses the unmodified FFmpeg 8.1.2 source vendored in `third_party/ffmpeg-8.1.2`. D3D11VA is enabled and Vulkan is disabled. The AMD AV1 patch used by the GPU variant is never applied to this build. Both variants link FFmpeg dynamically; static builds are not supported. To rebuild just these DLLs, run `& .\tools\build_ffmpeg_minimal.ps1 -Variant Reference`, then `& .\tools\build_reference.ps1 -SkipFfmpegBuild` to relink and refresh the app-local DLLs.
 
 ## Accuracy
 

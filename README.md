@@ -43,7 +43,9 @@ or
 ```
 
 
-`build_gpu.ps1` verifies the archive with a fixed SHA-256 before extraction. If the archive is missing or modified, the same archive is downloaded from the current commit on GitHub `origin`, verified, and then replaced. `build_ffmpeg_minimal.ps1` can be used to regenerate the archive contents. Both downloaded vcpkg download files and binary caches are stored under `third_party/vcpkg` within the repository, and the user-common AppData cache is not used.
+`build_gpu.ps1` builds FFmpeg from the unmodified upstream source vendored in `third_party/ffmpeg-8.1.2`. It applies the AMD AV1 Vulkan Video compatibility patch only to a private GPU source copy, enables Vulkan Video, and installs DLLs in `third_party/ffmpeg-gpu-shared`. For the manual CMake commands above, first run `& .\tools\build_ffmpeg_minimal.ps1 -Variant Gpu`.
+
+Build the reference with `& .\tools\build_reference.ps1`. Its separate, unpatched D3D11VA build installs DLLs in `third_party/ffmpeg-reference-shared` and disables Vulkan. Both variants use dynamic linking and place their own DLLs beside their executable, so they do not depend on a shared FFmpeg `PATH`. Binary ZIP distributions are no longer used. Building FFmpeg requires Visual Studio x64 C++ tools, MSYS2 make/diffutils, and the Vulkan SDK for the GPU variant; vcpkg supplies libdav1d/libjxl/pkgconf.
 
 
 The executable is generated at the following location:

@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Dynamic', 'Static')]
+    [ValidateSet('Dynamic')]
     [string]$Linkage = 'Dynamic',
-    [string]$Prefix = (Join-Path $PSScriptRoot "..\third_party\ffmpeg-8.1.2-shared"),
+    [ValidateSet('Gpu', 'Reference')]
+    [string]$Variant = 'Gpu',
     [string]$MsysRoot = (Join-Path $env:USERPROFILE 'msys64'),
     [string]$VcpkgRoot = '',
     [switch]$Clean
@@ -10,14 +11,27 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Check local tool prerequisites before downloading/building dependencies.
+if (-not (Test-Path -LiteralPath (Join-Path $MsysRoot 'usr\bin\bash.exe')) -and
+    -not (Test-Path -LiteralPath 'C:\msys64\usr\bin\bash.exe')) {
+    throw 'MSYS2 is required (make and diffutils). Install it or pass -MsysRoot <directory>.'
+}
+
 # Update this together with the matching ffmpeg-next dependency in
 # src_reference/Cargo.toml. 8.1.2 is the latest stable release as of 2026-07-10.
 $Version = '8.1.2'
-$SourceUrl = "https://ffmpeg.org/releases/ffmpeg-$Version.tar.xz"
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$BuildRoot = Join-Path $RepositoryRoot 'third_party\ffmpeg-build'
-$SourceRoot = Join-Path $BuildRoot "ffmpeg-$Version"
-$Prefix = [System.IO.Path]::GetFullPath($Prefix)
+$UpstreamRoot = Join-Path $RepositoryRoot "third_party\ffmpeg-$Version"
+$VariantName = $Variant.ToLowerInvariant()
+$BuildRoot = Join-Path $RepositoryRoot "third_party\ffmpeg-build\$VariantName"
+$SourceRoot = Join-Path $BuildRoot "source"
+$Prefix = Join-Path $RepositoryRoot "third_party\ffmpeg-$VariantName-shared"
+if (-not (Test-Path -LiteralPath (Join-Path $UpstreamRoot 'configure'))) {
+    throw "Vendored FFmpeg source is missing: $UpstreamRoot"
+}
+if ((Get-Content -LiteralPath (Join-Path $UpstreamRoot 'libavcodec\vulkan_av1.c') -Raw).Contains('VK_DRIVER_ID_AMD_PROPRIETARY ?')) {
+    throw 'The vendored upstream source must remain unpatched; only the GPU working copy may be patched.'
+}
 $ZlibVersion = '1.3.1'
 $ZlibSourceRoot = Join-Path $BuildRoot "zlib-$ZlibVersion"
 $ZlibBuildRoot = Join-Path $BuildRoot "zlib-$ZlibVersion-build"
@@ -169,6 +183,7 @@ function ConvertTo-BashPath([string]$Path) {
 }
 
 $VsDevShell = @(
+    'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\Launch-VsDevShell.ps1',
     'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1',
     'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Launch-VsDevShell.ps1'
 ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
@@ -204,42 +219,28 @@ foreach ($MsysCommand in @('make', 'cmp')) {
     }
 }
 
+# Both variants build private working copies; never modify the vendored source.
+$ExpectedBuildRoot = [System.IO.Path]::GetFullPath(
+    (Join-Path $RepositoryRoot "third_party\ffmpeg-build\$VariantName"))
+if ([System.IO.Path]::GetFullPath($BuildRoot) -ne $ExpectedBuildRoot) {
+    throw 'Unexpected FFmpeg build directory.'
+}
 if ($Clean -and (Test-Path -LiteralPath $BuildRoot)) {
     Remove-Item -LiteralPath $BuildRoot -Recurse -Force
 }
-
 New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
-$Archive = Join-Path $BuildRoot "ffmpeg-$Version.tar.xz"
-if (-not (Test-Path -LiteralPath $SourceRoot)) {
-    if (-not (Test-Path -LiteralPath $Archive)) {
-        Write-Host "Downloading FFmpeg $Version from ffmpeg.org"
-        try {
-            Invoke-WebRequest -Uri $SourceUrl -OutFile $Archive
-        } catch {
-            Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
-            $git = Get-Command 'git.exe' -CommandType Application -ErrorAction SilentlyContinue
-            if ($null -eq $git) {
-                $git = Get-Command 'git' -CommandType Application -ErrorAction SilentlyContinue
-            }
-            if ($null -eq $git) {
-                throw "Unable to download FFmpeg from ffmpeg.org and git.exe is unavailable for the fallback: $_"
-            }
-            Write-Warning 'ffmpeg.org was unavailable; cloning the matching tag from the official FFmpeg GitHub mirror.'
-            & $git.Source clone --depth 1 --branch "n$Version" `
-                https://github.com/FFmpeg/FFmpeg.git $SourceRoot
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Unable to clone the FFmpeg source fallback.'
-            }
-        }
+if (Test-Path -LiteralPath $SourceRoot) {
+    if ([System.IO.Path]::GetFullPath($SourceRoot) -ne (Join-Path $ExpectedBuildRoot 'source')) {
+        throw 'Unexpected FFmpeg source working directory.'
     }
-    if (-not (Test-Path -LiteralPath $SourceRoot)) {
-        & tar.exe -xf $Archive -C $BuildRoot
-        if ($LASTEXITCODE -ne 0) {
-            throw "Unable to unpack $Archive"
-        }
-    }
+    Remove-Item -LiteralPath $SourceRoot -Recurse -Force
 }
+Copy-Item -LiteralPath $UpstreamRoot -Destination $SourceRoot -Recurse
+# Remove the success marker before any build, so a failed rebuild cannot be used.
+$MarkerPath = Join-Path $Prefix 'dssim-ffmpeg-variant.txt'
+Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
 
+if ($Variant -eq 'Gpu') {
 # FFmpeg commit b637624046a0 changed AV1 tile starts from superblock units to
 # the mode-info units required by the Vulkan Video specification. The AMD
 # proprietary Windows driver still interprets these values as superblock units,
@@ -260,6 +261,8 @@ if ($VulkanAv1Text.Contains($VulkanAv1Original)) {
     Set-Content -LiteralPath $VulkanAv1Source -Value $VulkanAv1Text -NoNewline -Encoding utf8
 } elseif (-not $VulkanAv1Text.Contains($VulkanAv1PatchMarker)) {
     throw 'FFmpeg vulkan_av1.c changed; the AMD AV1 tile-unit compatibility patch must be reviewed.'
+}
+
 }
 
 # FFmpeg's native PNG decoder requires zlib. Keep it as an FFmpeg build
@@ -313,18 +316,19 @@ $ZlibIncludeBashPath = ConvertTo-BashPath (Join-Path $ZlibPrefix 'include')
 $ZlibLibBashPath = ConvertTo-BashPath (Join-Path $ZlibPrefix 'lib')
 $VcpkgIncludeBashPath = ConvertTo-BashPath $VcpkgInclude
 $VcpkgLibBashPath = ConvertTo-BashPath $VcpkgLib
-$VulkanIncludeBashPath = ConvertTo-BashPath (Join-Path $env:VULKAN_SDK 'Include')
-$Parallelism = [Math]::Max(1, [Environment]::ProcessorCount)
-$LinkageArguments = if ($Linkage -eq 'Dynamic') {
-    @('--enable-shared', '--disable-static')
+$HardwareArguments = if ($Variant -eq 'Gpu') {
+    $VulkanIncludeBashPath = ConvertTo-BashPath (Join-Path $env:VULKAN_SDK 'Include')
+    @('--enable-vulkan', '--disable-d3d11va',
+      '--enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan,vp9_vulkan',
+      "--extra-cflags=-I$VulkanIncludeBashPath")
 } else {
-    @('--enable-static', '--disable-shared')
+    # Both D3D11VA switch forms are required for FFmpeg's shared dxva2 objects.
+    @('--disable-vulkan', '--enable-d3d11va',
+      '--enable-hwaccel=h264_d3d11va,hevc_d3d11va,av1_d3d11va,vp9_d3d11va,h264_d3d11va2,hevc_d3d11va2,av1_d3d11va2,vp9_d3d11va2')
 }
+$Parallelism = [Math]::Max(1, [Environment]::ProcessorCount)
+$LinkageArguments = @('--enable-shared', '--disable-static')
 
-# Keep only the containers, parsers, codecs, and hardware accelerators needed
-# by the two consumers of this shared prefix. dssim-Vulkan consumes
-# AV_PIX_FMT_VULKAN frames, while src_reference uses AV_PIX_FMT_D3D11 frames.
-# Still images use the CPU-side libswscale conversion to RGBA8.
 $ConfigureArguments = @(
     '--toolchain=msvc', '--arch=x86_64',
     "--prefix=$PrefixBashPath"
@@ -340,24 +344,18 @@ $ConfigureArguments = @(
     '--enable-parser=h264,hevc,av1,vp9,jpegxl',
     '--enable-decoder=h264,hevc,av1,vp9,libdav1d,png,mjpeg,libjxl,jpeg2000,webp',
     '--enable-libdav1d', '--enable-libjxl',
-    '--enable-vulkan', '--enable-d3d11va',
-    # FFmpeg 8.1.2's Makefile keys the shared dxva2_*.o implementation files
-    # on the legacy *_d3d11va switches, even though src_reference consumes the
-    # *_d3d11va2 configurations. Enable both forms so those symbols are linked.
-    '--enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan,vp9_vulkan,h264_d3d11va,hevc_d3d11va,av1_d3d11va,vp9_d3d11va,h264_d3d11va2,hevc_d3d11va2,av1_d3d11va2,vp9_d3d11va2',
     # Rust's MSVC target uses the dynamic CRT. Match it in FFmpeg so the
     # FFmpeg objects do not introduce LIBCMT and cause LNK4098 at the final
     # executable link.
     # `-MD` is accepted by cl.exe and, unlike `/MD`, is not rewritten as an
     # MSYS2 path while it passes through bash.exe.
     '--extra-cflags=-MD',
-    "--extra-cflags=-I$VulkanIncludeBashPath",
     "--extra-cflags=-I$ZlibIncludeBashPath",
     "--extra-cflags=-I$VcpkgIncludeBashPath",
     "--extra-ldflags=-LIBPATH:$ZlibLibBashPath",
     "--extra-ldflags=-LIBPATH:$VcpkgLibBashPath",
     '--extra-libs=zlibstatic.lib'
-)
+) + $HardwareArguments
 
 $ConfigureLine = './configure ' + ($ConfigureArguments -join ' ')
 if (Test-Path -LiteralPath (Join-Path $SourceRoot 'ffbuild\config.mak')) {
@@ -400,7 +398,8 @@ if ($Linkage -eq 'Dynamic') {
     }
 }
 
-Write-Host "Minimal $Linkage FFmpeg installed at $Prefix"
+Set-Content -LiteralPath $MarkerPath -Value "$VariantName-shared-v1" -Encoding ascii
+Write-Host "Minimal $Variant $Linkage FFmpeg installed at $Prefix"
 Write-Host 'Configure and build the Vulkan GPU executable with:'
 Write-Host '  & cmake -S . -B build'
 Write-Host '  & cmake --build build --config Release --target dssim_vulkan'
